@@ -16,6 +16,7 @@ def run_classic(config, pcap):
     output_dir = config["output_dir"]
     size = config["classic"]["size_of_window"]
     mode = config["classic"]["mode"]
+    workers = config["classic"].get("workers", 1)  # optional; 1 = sequential, as before
 
     cmd = [
         sys.executable,  # Use the current Python interpreter
@@ -23,7 +24,8 @@ def run_classic(config, pcap):
         pcap,
         "--size_of_window", str(size),
         "--mode", mode,
-        "--output_dir", output_dir  # results are written there directly
+        "--output_dir", output_dir,  # results are written there directly
+        "--workers", str(workers)
     ]
 
     print(f"Running Classic Preprocessing: {' '.join(cmd)}")

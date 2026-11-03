@@ -4,6 +4,7 @@ output_dir: "./output"
 classic:
   mode: all      # Tipo de análisis (paquetes, ventana, flujos, combinada, all)
   size_of_window: 10     # Número de paquetes por ventana
+  # workers: 1           # Opcional. Chunks calculados a la vez (1 = secuencial; 0 = todos los núcleos). Mismo resultado.
 
 nprint:
   headers: [ethernet, ipv4, ipv6, absolute_time, icmp, tcp, udp, relative_time, arp]    # Headers de los protocolos incluidos en el output
