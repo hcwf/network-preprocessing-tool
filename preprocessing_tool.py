@@ -441,19 +441,45 @@ def extract_tcp_flags(flag_value):
         return { 'fin': False, 'syn': False, 'rst': False, 'ack': False }
 
 # 4. Procesar el pcap y guardar resultados según el mode seleccionado
+
+# Rows per chunk. Statistics are computed chunk by chunk, so this value is part of how the published
+# datasets were produced (windows and column types are decided per chunk): keep it unless outputs do
+# not need to stay comparable with the original tool.
+CHUNK_SIZE = 200_000
+
+def normalize_packet_csv(csv_path):
+    """Rewrite the raw tshark CSV exactly as the original code did, but without loading it into memory.
+
+    The original read the whole file, concatenated it and wrote it back with to_csv. The only thing in
+    that result that depends on other chunks is the column type after the concatenation: a column that is
+    int64 in one chunk and float64 in another is float64 everywhere (80 is written as 80.0). Everything
+    else is formatted value by value, so once those columns are cast the chunks can be written one by one.
+    """
+    int64, float64 = np.dtype("int64"), np.dtype("float64")
+    seen = {}
+    for chunk in pd.read_csv(csv_path, chunksize=CHUNK_SIZE, low_memory=False):
+        for col, dtype in chunk.dtypes.items():
+            seen.setdefault(col, set()).add(dtype)
+    to_float = [col for col, dtypes in seen.items()
+                if len(dtypes) > 1 and all(d in (int64, float64) for d in dtypes)]
+
+    tmp_path = csv_path + ".tmp"
+    first = True
+    for chunk in pd.read_csv(csv_path, chunksize=CHUNK_SIZE, low_memory=False):
+        for col in to_float:
+            chunk[col] = chunk[col].astype("float64")
+        chunk.to_csv(tmp_path, mode='w' if first else 'a', index=False, header=first)
+        first = False
+    if not first:
+        os.replace(tmp_path, csv_path)
+
 def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, mode):
     run_tshark(pcap_file, output_csv)
-    #df = pd.read_csv(output_csv, low_memory=False)
-    chunksize = 200_000  # Ajustad según vuestra RAM, podéis probar 50_000 si sigue fallando
-
-    chunks = []
-    for chunk in pd.read_csv(output_csv, chunksize=chunksize, low_memory=False):
-        chunks.append(chunk)
-
-    df = pd.concat(chunks, ignore_index=True)
+    # The original loaded the whole packet table here in every mode, although only "paquetes" and
+    # "all" use it. Now only those two modes touch the full file, and they do it chunk by chunk.
     if mode in ["paquetes", "all"]:
         # Guardar el CSV de paquetes tal cual
-        df.to_csv(output_csv, index=False)
+        normalize_packet_csv(output_csv)
 
         print(f"Archivo de paquetes guardado en {output_csv}")
 
@@ -461,7 +487,7 @@ def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_
         first_chunk_ven = True
         first_chunk_Comb = True
         first_chunk_fluj = True
-        for chunk in pd.read_csv(output_csv, chunksize=200_000, low_memory=False):
+        for chunk in pd.read_csv(output_csv, chunksize=CHUNK_SIZE, low_memory=False):
             if mode in ["combinada", "flujos", "all"]:
                 # Calcular estadísticas de flujos y agregarlas por ventana
                 stats_flow = process_flows(chunk, window_size=size_of_window)
