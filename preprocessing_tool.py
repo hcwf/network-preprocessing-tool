@@ -6,6 +6,7 @@ import numpy as np
 from scipy import stats
 import argparse
 import os
+import sys
 
 # Crear el parser
 parser = argparse.ArgumentParser(description="Analizar un archivo pcap con una ventana de tamaño definido.")
@@ -63,8 +64,14 @@ def run_tshark(pcap_file, output_csv):
     with open(output_csv, 'w') as f:
         try:
             subprocess.run(command, stdout=f, check=True)
-        except subprocess.CalledProcessError:
-            print("Error ejecutando tshark. Verifica los campos seleccionados.")
+        except subprocess.CalledProcessError as e:
+            # Processing continues with the CSV written so far, as before (a capture that ends in a
+            # cut-off packet also makes tshark exit non-zero but still yields usable output), but the
+            # exit code is now reported so a crash or kill in a long run is not mistaken for success.
+            print(f"Error ejecutando tshark (código de salida {e.returncode}). "
+                  f"El CSV puede estar incompleto: revisa los mensajes de tshark. "
+                  f"/ tshark failed with exit code {e.returncode}; the CSV may be incomplete.",
+                  file=sys.stderr)
 
 # 2. Procesar ventanas de 10 paquetes
 def process_windows(df, window_size=size_of_window):
