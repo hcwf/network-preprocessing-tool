@@ -7,7 +7,12 @@ import dataclasses
 import subprocess
 import argparse
 import tempfile
-import os, dpkt
+import sys
+import os
+
+# Rows of nPrint output processed at a time. nPrint rows are very wide (well over a thousand columns),
+# so this keeps memory use to a few GB however large the capture is.
+NPRINT_CHUNK_ROWS = 50_000
 
 # used for input 
 
@@ -22,7 +27,7 @@ class SinglePcapConfigTemplate():
     masks: list[str]
     input_file: str
     output_file: str
-    packets_to_read: int
+    packets_to_read: int | str = 'max'   # 'max' = every packet (no -c given to nPrint); 0 = do nothing
 
 
 class Mask(ABC):
@@ -264,6 +269,9 @@ class Nprinter(INprinter):
         args = self._create_args()
         nprint_process = subprocess.Popen(args, stdout=subprocess.PIPE)
         nprint_process.wait()
+        if nprint_process.returncode != 0:
+            # Processing continues with what was written, as before, but the failure is not hidden.
+            print(f"nPrint exited with code {nprint_process.returncode}; the output may be incomplete.", file=sys.stderr)
 
 class IPcap2Series(ABC):
     '''
@@ -299,11 +307,23 @@ class IPcap2Series(ABC):
             ) for mask in masks
         ]
 
+        self._temp_dir = None   # where nPrint's intermediate CSV goes (default: system temp dir)
+
         self._nprinter = Nprinter()
         for header in headers:
             self._nprinter.add_header(header)
         for flag in flags:
             self._nprinter.set_flag(flag)
+
+    def set_temp_dir(self, path: str | None) -> None:
+        '''
+        set_temp_dir sets the folder for nPrint's intermediate CSV. It is as large as the final output, so it
+        should be on a disk with room for it (the system temp dir is often small or in memory).
+
+        @param path: an existing folder, or None for the system default
+        '''
+
+        self._temp_dir = path
 
     def set_read_packets(self, number: str | int) -> None:
         '''
@@ -340,6 +360,26 @@ class IPcap2Series(ABC):
         dataframe = pd.read_csv(temporary_output.name)
         return dataframe
 
+    def _pcap_to_dataframe_chunks(self, printer: INprinter, pcap_file: str, chunk_rows: int):
+        '''
+        _pcap_to_dataframe_chunks is _pcap_to_dataframe without holding the whole result in memory: it yields
+        the dataframe of nPrint's output chunk_rows rows at a time.
+
+        @param printer: printer to use
+        @param pcap_file: the path to the file you want
+        @param chunk_rows: rows per dataframe
+        '''
+
+        printer.set_pcap_file(pcap_file)
+
+        with tempfile.NamedTemporaryFile(suffix='.csv', dir=self._temp_dir) as temporary_output:
+            printer.set_target_file(temporary_output.name)
+            printer.execute()
+            try:
+                yield from pd.read_csv(temporary_output.name, chunksize=chunk_rows)
+            except pd.errors.EmptyDataError:
+                return   # nPrint wrote nothing: no packets
+
     @abstractmethod
     def pcap_to_object(self, pcap_path: str) -> Any:
         '''
@@ -364,6 +404,16 @@ class Pcap2PandasSeries(IPcap2Series):
             masker.mask(dataframe)
 
         return dataframe
+
+    def pcap_to_chunks(self, pcap_path: str, chunk_rows: int):
+        '''
+        pcap_to_chunks yields the masked dataframe of a file chunk_rows rows at a time
+        '''
+
+        for dataframe in self._pcap_to_dataframe_chunks(self._nprinter, pcap_path, chunk_rows):
+            for masker in self._maskers:
+                masker.mask(dataframe)
+            yield dataframe
             
 
 class IPipeline(ABC):
@@ -406,6 +456,10 @@ class SinglePcapPipeline(PcapPipeline):
             configuration_template.masks_type, 
             configuration_template.masks,
             []
+        )
+        # the intermediate CSV is as large as the output: keep it on the output's disk
+        self._pcap2series_converter.set_temp_dir(
+            os.path.dirname(os.path.abspath(configuration_template.output_file))
         )
     
     def _add_series_identifier(
@@ -519,11 +573,11 @@ class SinglePcapPipeline(PcapPipeline):
 
         #! THERE IS A BUG IN NPRINT WHEN number_processed IS 0 (prints everything)
         if number_to_process != 0:
-            dataframe = self._read_n_packets(
-                self._pcap2series_converter,
-                number_to_process,
-                source_file
-            )
+            if number_to_process != 'max' and number_to_process < 0:
+                raise Exception("packets_to_read must be 'max' or a positive number")
+            # -c is only given to nPrint when a limit was asked for: counting the packets first meant
+            # loading the whole file in memory (and dpkt cannot read pcapng).
+            self._pcap2series_converter.set_read_packets(number_to_process)
 
             # dataframe = self._drop_extra_packets(
             #     dataframe,
@@ -546,8 +600,9 @@ class SinglePcapPipeline(PcapPipeline):
             #     else:
             #         dataframe['type_' + configured_attack] = 0.0
 
-            self._fill_nans(dataframe)
-            self._write_processed_dataframe(target_csv, dataframe)
+            for dataframe in self._pcap2series_converter.pcap_to_chunks(source_file, NPRINT_CHUNK_ROWS):
+                self._fill_nans(dataframe)
+                self._write_processed_dataframe(target_csv, dataframe)
 
 
 def number_of_packets(path: str) -> int:
@@ -558,10 +613,12 @@ def number_of_packets(path: str) -> int:
     @returns: the number of packets within that file
     '''
 
+    import dpkt   # only needed here, and only reads classic .pcap files
+
     with open(path, 'rb') as f:
         pcap_reader = dpkt.pcap.Reader(f)    
         # pcaps have little metadata inside, to get this the only way is reading the packets themselves
-        return len(pcap_reader.readpkts())
+        return sum(1 for _ in pcap_reader)
 
 if __name__ == '__main__':
         
@@ -605,8 +662,7 @@ if __name__ == '__main__':
         'prefix_delete',
         args.masks,
         args.pcap_file,
-        args.output_csv or args.pcap_file + '.csv',
-        number_of_packets(args.pcap_file)
+        args.output_csv or args.pcap_file + '.csv'
     )
 
     pipeline = SinglePcapPipeline(
