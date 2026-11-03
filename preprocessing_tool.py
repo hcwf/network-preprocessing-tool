@@ -32,7 +32,9 @@ pcap_file = args.pcap_file
 #output_base = f"{pcap_base_name}.csv"
 # Extraer el nombre base del archivo de salida sin la extensión
 #output_base_name = os.path.splitext(output_base)[0]
-output_base_name = os.path.basename(pcap_file).replace(".pcap", "")
+# ".pcapng" must be removed first: removing only ".pcap" turns "capture.pcapng" into "captureng".
+# Names ending in ".pcap" produce exactly the same output names as before.
+output_base_name = os.path.basename(pcap_file).replace(".pcapng", "").replace(".pcap", "")
 
 # Generar nombres personalizados para los otros CSVs
 os.makedirs(args.output_dir, exist_ok=True)
