@@ -5,44 +5,15 @@ from functools import reduce
 import numpy as np
 from scipy import stats
 import argparse
+import collections
+import multiprocessing
 import os
 import sys
+import traceback
 
-# Crear el parser
-parser = argparse.ArgumentParser(description="Analizar un archivo pcap con una ventana de tamaño definido.")
-
-# Definir los argumentos
-parser.add_argument("pcap_file", type=str, help="Ruta del archivo pcap a analizar")
-parser.add_argument("--size_of_window", type=int, default=10, help="Tamaño de la ventana en paquetes (por defecto: 10)")
-parser.add_argument("--mode", type=str, choices=["combinada", "paquetes", "ventana", "flujos", "all"],
-                    default="all", help="mode de análisis (combinada, paquetes, ventana, flujos, all). Por defecto: all")
-parser.add_argument("--output_dir", type=str, default=".",
-                    help="Carpeta donde se escriben los CSV (por defecto: la carpeta actual)")
-
-
-# Parsear los argumentos
-args = parser.parse_args()
-
-# Definir variables
-size_of_window = args.size_of_window
-mode = args.mode
-pcap_file = args.pcap_file
-# Extraer el nombre base del archivo pcap sin la extensión
-#pcap_base_name = os.path.splitext(pcap_file)[0]
-# Definir el nombre del CSV principal a partir del pcap
-#output_base = f"{pcap_base_name}.csv"
-# Extraer el nombre base del archivo de salida sin la extensión
-#output_base_name = os.path.splitext(output_base)[0]
-# ".pcapng" must be removed first: removing only ".pcap" turns "capture.pcapng" into "captureng".
-# Names ending in ".pcap" produce exactly the same output names as before.
-output_base_name = os.path.basename(pcap_file).replace(".pcapng", "").replace(".pcap", "")
-
-# Generar nombres personalizados para los otros CSVs
-os.makedirs(args.output_dir, exist_ok=True)
-output_csv = os.path.join(args.output_dir, f"paquetes_{output_base_name}.csv")
-output_stats = os.path.join(args.output_dir, f"estadisticas_ventanas_{output_base_name}.csv")
-output_flow_stats = os.path.join(args.output_dir, f"estadisticas_flujo_{output_base_name}.csv")
-output_combined_stats = os.path.join(args.output_dir, f"estadisticas_combinadas_{output_base_name}.csv")
+# Window size used as the default argument of the functions below. The value given with
+# --size_of_window is always passed to them explicitly, so this default is never relied upon.
+size_of_window = 10
 
 # Nueva gestión de flujos usando un diccionario
 flows = {}
@@ -473,7 +444,91 @@ def normalize_packet_csv(csv_path):
     if not first:
         os.replace(tmp_path, csv_path)
 
-def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, mode):
+def _process_chunk(chunk, mode, window_size):
+    """Statistics of one chunk: the body of the original per-chunk loop, same calls in the same order.
+
+    It only depends on the chunk (whose index continues from the previous chunks, so window numbers
+    are global), which is what makes it possible to compute chunks in parallel.
+    """
+    stats_flow = stats_window = combined_stats = None
+    if mode in ["combinada", "flujos", "all"]:
+        # Calcular estadísticas de flujos y agregarlas por ventana
+        stats_flow = process_flows(chunk, window_size=window_size)
+        if mode in ["combinada", "all"]:
+            stats_window_avg_df = stats_flow.groupby('Window', as_index=False).mean(numeric_only=True)
+    if mode in ["combinada", "ventana", "all"]:
+        # Calcular estadísticas por ventana
+        stats_window = process_windows(chunk, window_size=window_size)
+        if mode in ["combinada", "all"]:
+            # Combinar ambas estadísticas por 'Window'
+            combined_stats = stats_window.merge(stats_window_avg_df, on='Window', how='left')
+    return stats_flow, stats_window, combined_stats
+
+def _chunk_worker(conn, chunk, mode, window_size):
+    """Child process: compute one chunk and send the result (or the traceback) to the parent."""
+    try:
+        conn.send(("ok", _process_chunk(chunk, mode, window_size)))
+    except BaseException:
+        conn.send(("error", traceback.format_exc()))
+    finally:
+        conn.close()
+
+def _iter_chunk_results(chunks, mode, window_size, workers):
+    """Yield _process_chunk results in chunk order, optionally computing several chunks at once.
+
+    Parallel mode forks one child per chunk instead of pickling the chunk to a pool. This is deliberate:
+    process_flows looks up missing IP addresses (NaN, e.g. ARP/LLC frames) in dicts, and Python only finds
+    a NaN key again if it is the very same object. read_csv gives every missing value of a column the same
+    object, pickling does not, so a pool would silently change the flow statistics of non-IP frames. A
+    forked child sees exactly the chunk the sequential code sees.
+
+    At most `workers` children are alive at a time, so memory stays bounded however fast the CSV is read.
+    """
+    if workers <= 1:
+        for chunk in chunks:
+            yield _process_chunk(chunk, mode, window_size)
+        return
+
+    if "fork" not in multiprocessing.get_all_start_methods():
+        sys.exit("--workers > 1 needs the 'fork' start method (Linux/macOS); use --workers 1 on this platform.")
+    ctx = multiprocessing.get_context("fork")
+    pending = collections.deque()
+
+    def finish():
+        proc, conn = pending.popleft()
+        try:
+            status, payload = conn.recv()
+        except EOFError:
+            proc.join()
+            raise RuntimeError(f"A worker process died without a result (exit code {proc.exitcode}); "
+                               "it was probably killed because the machine ran out of memory. "
+                               "Try fewer --workers.")
+        finally:
+            conn.close()
+        proc.join()
+        if status != "ok":
+            raise RuntimeError("A worker process failed:\n" + payload)
+        return payload
+
+    try:
+        for chunk in chunks:
+            if len(pending) >= workers:
+                yield finish()
+            parent_conn, child_conn = ctx.Pipe(duplex=False)
+            proc = ctx.Process(target=_chunk_worker, args=(child_conn, chunk, mode, window_size))
+            proc.start()
+            child_conn.close()
+            pending.append((proc, parent_conn))
+        while pending:
+            yield finish()
+    finally:
+        for proc, conn in pending:
+            proc.terminate()
+            proc.join()
+            conn.close()
+
+def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, mode,
+                 window_size=size_of_window, workers=1):
     run_tshark(pcap_file, output_csv)
     # The original loaded the whole packet table here in every mode, although only "paquetes" and
     # "all" use it. Now only those two modes touch the full file, and they do it chunk by chunk.
@@ -487,25 +542,15 @@ def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_
         first_chunk_ven = True
         first_chunk_Comb = True
         first_chunk_fluj = True
-        for chunk in pd.read_csv(output_csv, chunksize=CHUNK_SIZE, low_memory=False):
-            if mode in ["combinada", "flujos", "all"]:
-                # Calcular estadísticas de flujos y agregarlas por ventana
-                stats_flow = process_flows(chunk, window_size=size_of_window)
-                if mode in ["flujos", "all"]:
-                    # Guardar estadísticas de flows
-                    stats_flow.to_csv(output_flow_stats, mode='w' if first_chunk_fluj else 'a', index=False, header=first_chunk_fluj)
-                    first_chunk_fluj = False
-                if mode in ["combinada", "all"]:
-                    stats_window_avg_df = stats_flow.groupby('Window', as_index=False).mean(numeric_only=True)
-            if mode in ["combinada", "ventana", "all"]:
-                # Calcular estadísticas por ventana
-                stats_window = process_windows(chunk, window_size=size_of_window)
-                if mode in ["ventana", "all"]:
-                    stats_window.to_csv(output_stats, mode='w' if first_chunk_ven else 'a', index=False, header=first_chunk_ven)
-                    first_chunk_ven = False
-                if mode in ["combinada", "all"]:
-                    # Combinar ambas estadísticas por 'Window'
-                    combined_stats = stats_window.merge(stats_window_avg_df, on='Window', how='left')
+        chunks = pd.read_csv(output_csv, chunksize=CHUNK_SIZE, low_memory=False)
+        for stats_flow, stats_window, combined_stats in _iter_chunk_results(chunks, mode, window_size, workers):
+            if mode in ["flujos", "all"]:
+                # Guardar estadísticas de flows
+                stats_flow.to_csv(output_flow_stats, mode='w' if first_chunk_fluj else 'a', index=False, header=first_chunk_fluj)
+                first_chunk_fluj = False
+            if mode in ["ventana", "all"]:
+                stats_window.to_csv(output_stats, mode='w' if first_chunk_ven else 'a', index=False, header=first_chunk_ven)
+                first_chunk_ven = False
             if mode in ["combinada", "all"]:
                 # Guardar al CSV
                 combined_stats.to_csv(output_combined_stats, mode='w' if first_chunk_Comb else 'a',index=False, header=first_chunk_Comb)
@@ -515,7 +560,45 @@ def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_
         print(f"Estadísticas por flujo guardadas en {output_flow_stats}")
         print(f"Estadísticas combinadas guardadas en {output_combined_stats}")
 
-process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, mode)
+def main():
+    # Crear el parser
+    parser = argparse.ArgumentParser(description="Analizar un archivo pcap con una ventana de tamaño definido.")
+
+    # Definir los argumentos
+    parser.add_argument("pcap_file", type=str, help="Ruta del archivo pcap a analizar")
+    parser.add_argument("--size_of_window", type=int, default=10, help="Tamaño de la ventana en paquetes (por defecto: 10)")
+    parser.add_argument("--mode", type=str, choices=["combinada", "paquetes", "ventana", "flujos", "all"],
+                        default="all", help="mode de análisis (combinada, paquetes, ventana, flujos, all). Por defecto: all")
+    parser.add_argument("--output_dir", type=str, default=".",
+                        help="Carpeta donde se escriben los CSV (por defecto: la carpeta actual)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Procesos que calculan estadísticas a la vez (por defecto: 1, secuencial como antes; "
+                             "0 = todos los núcleos). El resultado es idéntico; cada proceso necesita memoria "
+                             "para unos pocos chunks de %d filas." % CHUNK_SIZE)
+
+    # Parsear los argumentos
+    args = parser.parse_args()
+    workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
+
+    # Definir variables
+    pcap_file = args.pcap_file
+    # ".pcapng" must be removed first: removing only ".pcap" turns "capture.pcapng" into "captureng".
+    # Names ending in ".pcap" produce exactly the same output names as before.
+    output_base_name = os.path.basename(pcap_file).replace(".pcapng", "").replace(".pcap", "")
+
+    # Generar nombres personalizados para los otros CSVs
+    os.makedirs(args.output_dir, exist_ok=True)
+    output_csv = os.path.join(args.output_dir, f"paquetes_{output_base_name}.csv")
+    output_stats = os.path.join(args.output_dir, f"estadisticas_ventanas_{output_base_name}.csv")
+    output_flow_stats = os.path.join(args.output_dir, f"estadisticas_flujo_{output_base_name}.csv")
+    output_combined_stats = os.path.join(args.output_dir, f"estadisticas_combinadas_{output_base_name}.csv")
+
+    process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, args.mode,
+                 window_size=args.size_of_window, workers=workers)
+
+# The guard is required: worker processes import this file and must not run the analysis again.
+if __name__ == "__main__":
+    main()
 
 
 
