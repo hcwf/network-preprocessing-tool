@@ -53,6 +53,30 @@ The features of the datasets published with this tool (CICIoMT2024 and IoMT-Traf
 python3 miotta_npt.py capture.pcap --config config/iomt_ids_window100.yaml
 ```
 
+## 🗄️ Large captures (hundreds of GB and more)
+
+`.pcap` and `.pcapng` inputs work in both modes, and no stage loads a whole capture into memory any more:
+`classic` mode works on 200,000-row chunks and `nprint` mode on 50,000-row chunks. **The extracted features
+are unchanged**: the feature functions are untouched, and on the test captures used during development the
+output was byte-identical to the original. Confirm this on your own data with `tools/compare_outputs.py` (below).
+
+- **Speed (`classic` mode).** `workers` in the `classic:` section of the YAML (or `--workers N` on
+  `preprocessing_tool.py`; default `1` = sequential as before, `0` = all cores) computes several chunks at the
+  same time and writes them back in order. The output is identical for any value. Each worker needs memory for
+  one chunk (about a few GB; lower the value if the machine runs out of memory). The tshark pass that comes first
+  is single-threaded and is not sped up. `workers > 1` needs the `fork` start method (Linux/macOS).
+- **Disk is the limit, not memory.** The outputs themselves are large, and they are what the tool has always
+  written. Rough sizes, measured on synthetic traffic, so measure a small slice of your own capture first:
+  the packet table `paquetes_*.csv` takes about 135 bytes per packet, and the flow statistics
+  (`flujos`/`all`, window of 10) about 200 bytes per packet. In `paquetes` and `all` modes the packet table is
+  rewritten, which needs one extra copy of it while it runs. `nprint` rows have more than 1,500 columns, i.e.
+  several KB per packet, and nPrint's intermediate CSV (as large as the final output) is created next to the
+  output file, so plan for about twice the output size there.
+- **Do not change `CHUNK_SIZE`** (`preprocessing_tool.py`) if outputs must stay comparable with datasets made with
+  the original tool: windows and column types are decided per chunk.
+- **Check a change of your own** with the same tool: run both versions on one capture and
+  `python3 tools/compare_outputs.py out_reference out_new`.
+
 ## 🛠️ YAML Configuration File
 
 Basic example (`config/example_config.yaml`):
@@ -90,6 +114,8 @@ miotta-npt/
 ├── miotta_npt.py                 # Main script
 ├── preprocessing_tool.py         # Statistical processing
 ├── preprocessing_tool_nprint.py  # Processing with nPrint
+├── tools/
+│   └── compare_outputs.py        # byte-for-byte comparison of two output folders
 ├── config/
 │   ├── example_config.yaml
 │   └── iomt_ids_window100.yaml   # configuration of the published datasets
