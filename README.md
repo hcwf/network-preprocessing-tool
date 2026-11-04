@@ -65,6 +65,24 @@ output was byte-identical to the original. Confirm this on your own data with `t
   same time and writes them back in order. The output is identical for any value. Each worker needs memory for
   one chunk (about a few GB; lower the value if the machine runs out of memory). The tshark pass that comes first
   is single-threaded and is not sped up. `workers > 1` needs the `fork` start method (Linux/macOS).
+- **Many captures (`jobs`, `--resume`, `--keep-going`).** Give `miotta_npt.py` as many `.pcap`/`.pcapng` files
+  as you like (a shell glob works); each is processed on its own and written to its own set of outputs.
+  - `jobs: N` at the top level of the YAML processes N captures at the same time (default 1). The output of
+    every capture is identical to a run with `jobs: 1`. Progress is printed as `Finished [k/total]`; the output of
+    each capture goes to `<output_dir>/.npt_state/<mode>_<name>.log`, which is deleted when it succeeds and kept
+    when it fails. Total load is `jobs x workers`: the tool warns when that is more than the CPU cores, and memory
+    scales the same way. Disk throughput is usually the limit with tshark, so a small N (2-4) is a good start.
+  - `--resume` skips captures that were already processed with the same settings (the markers are in
+    `<output_dir>/.npt_state`). A capture counts as finished only if its marker exists, its input file has the same
+    size and modification time, and its output files are still there; anything else is processed again. Use it to
+    continue after an interruption or a failure, or to add newly recorded files to a finished batch. Without
+    `--resume` every listed capture is processed again.
+  - `--keep-going` carries on after a failed capture and lists the failures at the end (the exit status is 1).
+    Without it the run stops at the first failure; with `jobs` above 1, captures already running finish.
+  - Ctrl-C and `kill` stop tshark/nPrint and the workers as well, and leave no marker for the capture that was
+    running. Two runs on the same `output_dir` cannot process the same capture at once (a lock file refuses it).
+  - Two captures whose names would produce the same output files (e.g. `a/cap.pcap` and `b/cap.pcap`, or
+    `cap.pcap` and `cap.pcapng`) are refused before anything runs.
 - **Disk is the limit, not memory.** The outputs themselves are large, and they are what the tool has always
   written. Rough sizes, measured on synthetic traffic, so measure a small slice of your own capture first:
   the packet table `paquetes_*.csv` takes about 135 bytes per packet, and the flow statistics
