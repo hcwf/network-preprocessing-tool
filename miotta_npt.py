@@ -2,8 +2,17 @@ import os
 import sys
 import yaml
 import argparse
+import datetime
 import difflib
+import hashlib
+import json
 import subprocess
+import time
+
+try:
+    import fcntl
+except ImportError:   # Windows: no protection against two runs working on the same capture
+    fcntl = None
 
 import npt_naming
 
@@ -97,10 +106,120 @@ def build_command(config, pcap):
     ]
     return "nPrint", cmd
 
-def run_file(config, pcap):
+# --- Which captures are already finished (for --resume) -------------------------------------------------------
+#
+# When a capture has been processed successfully, a small marker file is written to <output_dir>/.npt_state/.
+# It is removed again when the capture is started, so a run that is interrupted half way is never taken for a
+# finished one. --resume skips a capture only if its marker matches the current settings and input file and the
+# statistics files still exist.
+
+STATE_DIR = ".npt_state"
+STATE_FORMAT = 1   # raise if a change to the tool makes earlier results no longer interchangeable
+
+
+def settings_fingerprint(config):
+    """Hash of every setting that changes what is written. Settings that only change speed (workers, jobs) are left out."""
+    if config["mode"] == "classic":
+        relevant = {"mode": "classic", "classic_mode": config["classic"]["mode"],
+                    "size_of_window": config["classic"]["size_of_window"]}
+    else:
+        relevant = {"mode": "nprint", "headers": config["nprint"]["headers"], "masks": config["nprint"]["masks"]}
+    relevant["state_format"] = STATE_FORMAT
+    return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def marker_path(config, pcap):
+    mode = config["mode"]
+    return os.path.join(config["output_dir"], STATE_DIR, f"{mode}_{npt_naming.output_key(mode, pcap)}.json")
+
+
+def required_outputs(config, pcap):
+    output_dir = config["output_dir"]
+    if config["mode"] == "classic":
+        paths = npt_naming.classic_output_paths(pcap, output_dir)
+        return [paths[kind] for kind in npt_naming.CLASSIC_REQUIRED[config["classic"]["mode"]]]
+    return [npt_naming.nprint_output_path(pcap, output_dir)]
+
+
+def input_identity(pcap):
+    info = os.stat(pcap)
+    return {"size": info.st_size, "mtime_ns": info.st_mtime_ns}
+
+
+def is_finished(config, pcap):
+    try:
+        with open(marker_path(config, pcap)) as f:
+            marker = json.load(f)
+    except (OSError, ValueError):
+        return False
+    identity = input_identity(pcap)
+    return (marker.get("fingerprint") == settings_fingerprint(config)
+            and marker.get("size") == identity["size"] and marker.get("mtime_ns") == identity["mtime_ns"]
+            and all(os.path.exists(path) for path in required_outputs(config, pcap)))
+
+
+def clear_marker(config, pcap):
+    try:
+        os.remove(marker_path(config, pcap))
+    except FileNotFoundError:
+        pass
+
+
+def write_marker(config, pcap, identity, seconds):
+    path = marker_path(config, pcap)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    marker = {"input": os.path.abspath(pcap), **identity, "fingerprint": settings_fingerprint(config),
+              "seconds": round(seconds, 1),
+              "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(marker, f, indent=1)
+    os.replace(tmp, path)   # a marker is either complete or absent
+
+
+class CaptureBusy(Exception):
+    """Another process is still working on this capture's output files."""
+
+
+def acquire_lock(config, pcap):
+    """Take an exclusive lock on this capture's outputs and return its file descriptor (None if unsupported).
+
+    The processing child inherits the descriptor, so the lock is held for as long as the child runs, even if
+    this script is killed in the meantime. That matters because killing the script does not stop a child that
+    is already running: starting the same capture again (--resume) while it is still writing would mix the
+    output of two runs.
+    """
+    if fcntl is None:
+        return None
+    path = marker_path(config, pcap)[:-len(".json")] + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise CaptureBusy(pcap)
+    return fd
+
+
+def process_capture(config, pcap):
+    """Run one capture and record that it finished."""
+    lock_fd = acquire_lock(config, pcap)
+    try:
+        identity = input_identity(pcap)   # taken before the run: a capture that changes meanwhile is not "finished"
+        clear_marker(config, pcap)
+        started = time.monotonic()
+        run_file(config, pcap, pass_fds=() if lock_fd is None else (lock_fd,))
+        write_marker(config, pcap, identity, time.monotonic() - started)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+
+def run_file(config, pcap, pass_fds=()):
     label, cmd = build_command(config, pcap)
     print(f"Running {label} Preprocessing: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, pass_fds=pass_fds)
 
 def check_inputs(mode, pcap_files):
     """Stop before any work starts if an input is missing or two captures would overwrite each other's output.
@@ -137,6 +256,9 @@ def main():
     parser.add_argument('--keep-going', action='store_true',
                         help="If a capture fails, carry on with the others and report the failures at the end "
                              "(default: stop at the first failure)")
+    parser.add_argument('--resume', action='store_true',
+                        help="Skip captures that were already processed successfully with the same settings "
+                             "(recorded in <output_dir>/.npt_state). Without it every listed capture is processed again.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -153,14 +275,27 @@ def main():
     files = check_inputs(mode, args.pcap_files)
     os.makedirs(config["output_dir"], exist_ok=True)
 
+    if args.resume:
+        done = {p for p in files if is_finished(config, p)}
+        if done:
+            print(f"Resume: {len(done)} of {len(files)} capture(s) are already finished and are skipped.")
+        files = [p for p in files if p not in done]
+        if not files:
+            print("Nothing left to do.")
+
     failed = []
     for index, pcap_file in enumerate(files, 1):
         print(f"Processing file: {pcap_file}")
         try:
-            run_file(config, pcap_file)
-        except subprocess.CalledProcessError as e:
-            failed.append((pcap_file, e.returncode))
-            print(f"ERROR: {pcap_file} failed (exit code {e.returncode}).", file=sys.stderr)
+            process_capture(config, pcap_file)
+        except (subprocess.CalledProcessError, CaptureBusy) as e:
+            if isinstance(e, CaptureBusy):
+                failed.append((pcap_file, "busy"))
+                print(f"ERROR: {pcap_file} is still being processed by another run (for example a run that was "
+                      f"killed but whose processing has not ended yet). Wait for it and use --resume.", file=sys.stderr)
+            else:
+                failed.append((pcap_file, e.returncode))
+                print(f"ERROR: {pcap_file} failed (exit code {e.returncode}).", file=sys.stderr)
             if not args.keep_going:
                 not_started = len(files) - index
                 if not_started:
@@ -171,7 +306,7 @@ def main():
     if failed:
         print(f"\n{len(failed)} of {len(files)} capture(s) failed:", file=sys.stderr)
         for pcap_file, code in failed:
-            print(f"  {pcap_file} (exit code {code})", file=sys.stderr)
+            print(f"  {pcap_file} ({'busy' if code == 'busy' else f'exit code {code}'})", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -48,7 +48,9 @@ def main():
     parser.add_argument("new_dir")
     args = parser.parse_args()
 
-    names_a, names_b = set(os.listdir(args.reference_dir)), set(os.listdir(args.new_dir))
+    # Hidden entries (such as .npt_state, the bookkeeping for --resume) are not results and are not compared.
+    names_a = {n for n in os.listdir(args.reference_dir) if not n.startswith(".")}
+    names_b = {n for n in os.listdir(args.new_dir) if not n.startswith(".")}
     ok = True
     for name in sorted(names_a | names_b):
         if name not in names_b:
