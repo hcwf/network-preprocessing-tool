@@ -209,14 +209,14 @@ def acquire_lock(config, pcap):
     return fd
 
 
-def process_capture(config, pcap):
-    """Run one capture and record that it finished."""
+def process_capture(config, pcap, log=None):
+    """Run one capture and record that it finished. With a log file the child's output goes there."""
     lock_fd = acquire_lock(config, pcap)
     try:
         identity = input_identity(pcap)   # taken before the run: a capture that changes meanwhile is not "finished"
         clear_marker(config, pcap)
         started = time.monotonic()
-        run_file(config, pcap, pass_fds=() if lock_fd is None else (lock_fd,))
+        run_file(config, pcap, pass_fds=() if lock_fd is None else (lock_fd,), log=log)
         write_marker(config, pcap, identity, time.monotonic() - started)
     finally:
         if lock_fd is not None:
@@ -228,12 +228,15 @@ _active_lock = threading.Lock()
 _shutting_down = threading.Event()   # set on interrupt: no new child may start afterwards
 
 
-def run_tracked(cmd, pass_fds=()):
-    """subprocess.run(cmd, check=True) that remembers the child so it can be stopped on interrupt."""
+def run_tracked(cmd, pass_fds=(), log=None):
+    """subprocess.run(cmd, check=True) that remembers the child so it can be stopped on interrupt.
+
+    With log=None the child writes to this terminal as before; with a file it gets stdout and stderr there.
+    """
     with _active_lock:
         if _shutting_down.is_set():
             raise KeyboardInterrupt()
-        proc = subprocess.Popen(cmd, pass_fds=pass_fds)
+        proc = subprocess.Popen(cmd, pass_fds=pass_fds, stdout=log, stderr=subprocess.STDOUT if log else None)
         _active.add(proc)
     try:
         returncode = proc.wait()
@@ -265,10 +268,11 @@ def stop_all_children():
         stop_child(proc)
 
 
-def run_file(config, pcap, pass_fds=()):
+def run_file(config, pcap, pass_fds=(), log=None):
     label, cmd = build_command(config, pcap)
-    print(f"Running {label} Preprocessing: {' '.join(cmd)}")
-    run_tracked(cmd, pass_fds=pass_fds)
+    if log is None:
+        print(f"Running {label} Preprocessing: {' '.join(cmd)}")
+    run_tracked(cmd, pass_fds=pass_fds, log=log)
 
 def check_inputs(mode, pcap_files):
     """Stop before any work starts if an input is missing or two captures would overwrite each other's output.
@@ -364,8 +368,13 @@ def warn_if_oversubscribed(config, jobs):
               f"scales with jobs x workers.", file=sys.stderr)
 
 
+def log_path(config, pcap):
+    return marker_path(config, pcap)[:-5] + ".log"
+
+
 def process_parallel(config, files, jobs, keep_going):
     """Process several captures at once. Each capture still runs in its own process exactly as when run alone."""
+    os.makedirs(os.path.join(config["output_dir"], STATE_DIR), exist_ok=True)
     failed, stop = [], threading.Event()
     done_count, print_lock = [0], threading.Lock()
     total = len(files)
@@ -377,16 +386,19 @@ def process_parallel(config, files, jobs, keep_going):
     def work(pcap):
         if stop.is_set():
             return pcap, "skipped"
+        path = log_path(config, pcap)
         started = time.monotonic()
         say(f"Started: {pcap}")
         try:
-            process_capture(config, pcap)
+            with open(path, "w") as log:
+                process_capture(config, pcap, log=log)
         except CaptureBusy:
             return pcap, "busy"
         except KeyboardInterrupt:
             return pcap, "skipped"
         except subprocess.CalledProcessError as e:
             return pcap, e.returncode
+        os.remove(path)               # logs are only kept for failed captures
         with print_lock:
             done_count[0] += 1
             n = done_count[0]
@@ -404,7 +416,7 @@ def process_parallel(config, files, jobs, keep_going):
             if code == "busy":
                 say(f"ERROR: {pcap} is still being processed by another run. Wait for it and use --resume.", True)
             else:
-                say(f"ERROR: {pcap} failed (exit code {code}).", True)
+                say(f"ERROR: {pcap} failed (exit code {code}). Its output is in {log_path(config, pcap)}", True)
             if not keep_going and not stop.is_set():
                 stop.set()
                 say("Stopping: captures that have not started will be skipped (use --keep-going to continue after "
