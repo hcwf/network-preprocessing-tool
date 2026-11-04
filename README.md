@@ -94,6 +94,11 @@ nprint:
   masks: [ethernet, arp, ipv4, ipv6, tcp, udp, ip, icmp]                                # Headers from which to remove location information
 ```
 
+The YAML is checked before any file is processed. Keys the tool does not know (a typo such as `worker`, or a
+setting placed in the wrong section) are reported as `WARNING` lines on stderr and ignored, with a "did you
+mean" hint where possible. A value that cannot work (for example `workers: "2"` or `workers: -1`) stops the
+run with an `ERROR` before anything is processed.
+
 ## 📂 Generated Outputs
 
 Depending on the method selected, CSV files are generated in the `output_dir` of the configuration (`./output` in the examples).
