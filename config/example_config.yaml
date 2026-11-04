@@ -1,5 +1,6 @@
 mode: "nprint"              # "nprint" o "classic"
 output_dir: "./output"
+# jobs: 1               # Opcional. Capturas procesadas a la vez Mismo resultado por captura.
 
 classic:
   mode: all      # Tipo de análisis (paquetes, ventana, flujos, combinada, all)
