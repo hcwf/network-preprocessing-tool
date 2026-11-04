@@ -11,6 +11,8 @@ import os
 import sys
 import traceback
 
+import npt_naming
+
 # Window size used as the default argument of the functions below. The value given with
 # --size_of_window is always passed to them explicitly, so this default is never relied upon.
 size_of_window = 10
@@ -582,16 +584,13 @@ def main():
 
     # Definir variables
     pcap_file = args.pcap_file
-    # ".pcapng" must be removed first: removing only ".pcap" turns "capture.pcapng" into "captureng".
-    # Names ending in ".pcap" produce exactly the same output names as before.
-    output_base_name = os.path.basename(pcap_file).replace(".pcapng", "").replace(".pcap", "")
-
-    # Generar nombres personalizados para los otros CSVs
+    # Generar nombres personalizados para los otros CSVs (the names live in npt_naming.py, shared with miotta_npt.py)
     os.makedirs(args.output_dir, exist_ok=True)
-    output_csv = os.path.join(args.output_dir, f"paquetes_{output_base_name}.csv")
-    output_stats = os.path.join(args.output_dir, f"estadisticas_ventanas_{output_base_name}.csv")
-    output_flow_stats = os.path.join(args.output_dir, f"estadisticas_flujo_{output_base_name}.csv")
-    output_combined_stats = os.path.join(args.output_dir, f"estadisticas_combinadas_{output_base_name}.csv")
+    paths = npt_naming.classic_output_paths(pcap_file, args.output_dir)
+    output_csv = paths["paquetes"]
+    output_stats = paths["ventanas"]
+    output_flow_stats = paths["flujo"]
+    output_combined_stats = paths["combinadas"]
 
     process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, args.mode,
                  window_size=args.size_of_window, workers=workers)
