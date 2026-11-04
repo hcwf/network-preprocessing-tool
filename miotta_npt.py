@@ -6,7 +6,9 @@ import datetime
 import difflib
 import hashlib
 import json
+import signal
 import subprocess
+import threading
 import time
 
 try:
@@ -216,10 +218,48 @@ def process_capture(config, pcap):
             os.close(lock_fd)
 
 
+_active = set()          # processing children that are running right now
+_active_lock = threading.Lock()
+
+
+def run_tracked(cmd, pass_fds=()):
+    """subprocess.run(cmd, check=True) that remembers the child so it can be stopped on interrupt."""
+    proc = subprocess.Popen(cmd, pass_fds=pass_fds)
+    with _active_lock:
+        _active.add(proc)
+    try:
+        returncode = proc.wait()
+    except BaseException:       # Ctrl-C / SIGTERM arrived while waiting: do not leave the child running
+        stop_child(proc)
+        raise
+    finally:
+        with _active_lock:
+            _active.discard(proc)
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+
+def stop_child(proc):
+    if proc.poll() is None:
+        proc.terminate()        # the processing scripts turn SIGTERM into a clean exit that stops tshark/nPrint too
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def stop_all_children():
+    with _active_lock:
+        procs = list(_active)
+    for proc in procs:
+        stop_child(proc)
+
+
 def run_file(config, pcap, pass_fds=()):
     label, cmd = build_command(config, pcap)
     print(f"Running {label} Preprocessing: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True, pass_fds=pass_fds)
+    run_tracked(cmd, pass_fds=pass_fds)
 
 def check_inputs(mode, pcap_files):
     """Stop before any work starts if an input is missing or two captures would overwrite each other's output.
@@ -261,6 +301,9 @@ def main():
                              "(recorded in <output_dir>/.npt_state). Without it every listed capture is processed again.")
     args = parser.parse_args()
 
+    # SIGTERM (kill, systemd, a closing job scheduler) is handled like Ctrl-C: stop the children, leave no marker.
+    signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
+
     config = load_config(args.config)
     try:
         warnings = validate_config(config)
@@ -284,6 +327,21 @@ def main():
             print("Nothing left to do.")
 
     failed = []
+    try:
+        failed = process_sequentially(config, files, args.keep_going)
+    except KeyboardInterrupt:
+        stop_all_children()
+        sys.exit("\nInterrupted. Captures that were finished are kept; run again with --resume to continue.")
+
+    if failed:
+        print(f"\n{len(failed)} of {len(files)} capture(s) failed:", file=sys.stderr)
+        for pcap_file, code in failed:
+            print(f"  {pcap_file} ({'busy' if code == 'busy' else f'exit code {code}'})", file=sys.stderr)
+        sys.exit(1)
+
+
+def process_sequentially(config, files, keep_going):
+    failed = []
     for index, pcap_file in enumerate(files, 1):
         print(f"Processing file: {pcap_file}")
         try:
@@ -296,18 +354,13 @@ def main():
             else:
                 failed.append((pcap_file, e.returncode))
                 print(f"ERROR: {pcap_file} failed (exit code {e.returncode}).", file=sys.stderr)
-            if not args.keep_going:
+            if not keep_going:
                 not_started = len(files) - index
                 if not_started:
                     print(f"Stopping: {not_started} capture(s) were not started (use --keep-going to continue "
                           f"after a failure).", file=sys.stderr)
                 break
-
-    if failed:
-        print(f"\n{len(failed)} of {len(files)} capture(s) failed:", file=sys.stderr)
-        for pcap_file, code in failed:
-            print(f"  {pcap_file} ({'busy' if code == 'busy' else f'exit code {code}'})", file=sys.stderr)
-        sys.exit(1)
+    return failed
 
 if __name__ == "__main__":
     main()

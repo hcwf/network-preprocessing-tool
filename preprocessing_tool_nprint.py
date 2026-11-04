@@ -7,6 +7,7 @@ import dataclasses
 import subprocess
 import argparse
 import tempfile
+import signal
 import sys
 import os
 
@@ -268,7 +269,12 @@ class Nprinter(INprinter):
     def execute(self) -> None:
         args = self._create_args()
         nprint_process = subprocess.Popen(args, stdout=subprocess.PIPE)
-        nprint_process.wait()
+        try:
+            nprint_process.wait()
+        finally:
+            if nprint_process.poll() is None:   # interrupted: do not leave nPrint running
+                nprint_process.kill()
+                nprint_process.wait()
         if nprint_process.returncode != 0:
             # Processing continues with what was written, as before, but the failure is not hidden.
             print(f"nPrint exited with code {nprint_process.returncode}; the output may be incomplete.", file=sys.stderr)
@@ -621,7 +627,10 @@ def number_of_packets(path: str) -> int:
         return sum(1 for _ in pcap_reader)
 
 if __name__ == '__main__':
-        
+
+    # When the batch runner stops this process (SIGTERM), exit normally so that nPrint is stopped too
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+
     # Crear el parser
     parser = argparse.ArgumentParser(description="Processing of a single PCAP file into a CSV consumable by ML models.")
 

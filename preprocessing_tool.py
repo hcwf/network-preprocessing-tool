@@ -8,6 +8,7 @@ import argparse
 import collections
 import multiprocessing
 import os
+import signal
 import sys
 import traceback
 
@@ -563,6 +564,10 @@ def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_
         print(f"Estadísticas combinadas guardadas en {output_combined_stats}")
 
 def main():
+    # When the batch runner stops this process (SIGTERM), exit through the normal unwinding: subprocess.run
+    # kills tshark and the finally block of _iter_chunk_results stops the chunk workers.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+
     # Crear el parser
     parser = argparse.ArgumentParser(description="Analizar un archivo pcap con una ventana de tamaño definido.")
 
