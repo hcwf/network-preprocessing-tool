@@ -5,6 +5,8 @@ import argparse
 import difflib
 import subprocess
 
+import npt_naming
+
 # Folder of this script: the helper scripts and the nPrint binary are found from here,
 # so the tool can be launched from any working directory.
 TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,27 +65,25 @@ def validate_config(config):
 
     return warnings
 
-def run_classic(config, pcap):
+def build_command(config, pcap):
+    """Return (label, command line) that processes one capture with the configured mode."""
     output_dir = config["output_dir"]
-    size = config["classic"]["size_of_window"]
-    mode = config["classic"]["mode"]
-    workers = config["classic"].get("workers", 1)  # optional; 1 = sequential, as before
+    if config["mode"] == "classic":
+        size = config["classic"]["size_of_window"]
+        mode = config["classic"]["mode"]
+        workers = config["classic"].get("workers", 1)  # optional; 1 = sequential, as before
 
-    cmd = [
-        sys.executable,  # Use the current Python interpreter
-        os.path.join(TOOL_DIR, "preprocessing_tool.py"),
-        pcap,
-        "--size_of_window", str(size),
-        "--mode", mode,
-        "--output_dir", output_dir,  # results are written there directly
-        "--workers", str(workers)
-    ]
+        cmd = [
+            sys.executable,  # Use the current Python interpreter
+            os.path.join(TOOL_DIR, "preprocessing_tool.py"),
+            pcap,
+            "--size_of_window", str(size),
+            "--mode", mode,
+            "--output_dir", output_dir,  # results are written there directly
+            "--workers", str(workers)
+        ]
+        return "Classic", cmd
 
-    print(f"Running Classic Preprocessing: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-
-def run_nprint(config, pcap):
-    output_dir = config["output_dir"]
     headers = config["nprint"]["headers"]
     masks = config["nprint"]["masks"]
 
@@ -93,16 +93,50 @@ def run_nprint(config, pcap):
         pcap,
         "--headers"
     ] + headers + ["--masks"] + masks + [
-        "--output_csv", os.path.join(output_dir, os.path.basename(pcap) + ".csv")
+        "--output_csv", npt_naming.nprint_output_path(pcap, output_dir)
     ]
+    return "nPrint", cmd
 
-    print(f"Running nPrint Preprocessing: {' '.join(cmd)}")
+def run_file(config, pcap):
+    label, cmd = build_command(config, pcap)
+    print(f"Running {label} Preprocessing: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
+
+def check_inputs(mode, pcap_files):
+    """Stop before any work starts if an input is missing or two captures would overwrite each other's output.
+
+    The old behaviour for same-named captures (for example dayA/cap.pcap0 and dayB/cap.pcap0) was that the
+    second silently replaced the first one's results. Returns the list of files to process.
+    """
+    unique = {}
+    for path in pcap_files:
+        unique.setdefault(os.path.abspath(path), path)
+    if len(unique) < len(pcap_files):
+        print(f"NOTE: {len(pcap_files) - len(unique)} input path(s) were given more than once and are processed once.")
+    files = list(unique.values())
+
+    missing = [p for p in files if not os.path.isfile(p)]
+    if missing:
+        listed = "\n  ".join(missing[:10]) + (f"\n  ... and {len(missing) - 10} more" if len(missing) > 10 else "")
+        sys.exit(f"ERROR: {len(missing)} input file(s) not found:\n  {listed}")
+
+    groups = {}
+    for path in files:
+        groups.setdefault(npt_naming.output_key(mode, path), []).append(path)
+    clashes = {key: paths for key, paths in groups.items() if len(paths) > 1}
+    if clashes:
+        lines = [f"  {key}: " + ", ".join(paths) for key, paths in list(clashes.items())[:10]]
+        sys.exit("ERROR: these captures would write the same output files and overwrite each other. "
+                 "Run them separately, with different output_dir values, or rename them:\n" + "\n".join(lines))
+    return files
 
 def main():
     parser = argparse.ArgumentParser(description="Unified preprocessor for IoMT traffic")
     parser.add_argument("pcap_files", type=str, nargs='+', help="Paths to the input PCAP files")
     parser.add_argument('--config', required=True, help="Path to YAML configuration file")
+    parser.add_argument('--keep-going', action='store_true',
+                        help="If a capture fails, carry on with the others and report the failures at the end "
+                             "(default: stop at the first failure)")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -113,17 +147,32 @@ def main():
     for warning in warnings:
         print(f"WARNING ({args.config}): {warning}", file=sys.stderr)
     mode = config["mode"]
+    if mode not in ("classic", "nprint"):
+        sys.exit(f"ERROR ({args.config}): unsupported mode {mode!r} (use 'classic' or 'nprint')")
 
+    files = check_inputs(mode, args.pcap_files)
     os.makedirs(config["output_dir"], exist_ok=True)
 
-    for pcap_file in args.pcap_files:
+    failed = []
+    for index, pcap_file in enumerate(files, 1):
         print(f"Processing file: {pcap_file}")
-        if mode == "classic":
-            run_classic(config, pcap_file)
-        elif mode == "nprint":
-            run_nprint(config, pcap_file)
-        else:
-            raise ValueError(f"Unsupported mode: {mode}")
+        try:
+            run_file(config, pcap_file)
+        except subprocess.CalledProcessError as e:
+            failed.append((pcap_file, e.returncode))
+            print(f"ERROR: {pcap_file} failed (exit code {e.returncode}).", file=sys.stderr)
+            if not args.keep_going:
+                not_started = len(files) - index
+                if not_started:
+                    print(f"Stopping: {not_started} capture(s) were not started (use --keep-going to continue "
+                          f"after a failure).", file=sys.stderr)
+                break
+
+    if failed:
+        print(f"\n{len(failed)} of {len(files)} capture(s) failed:", file=sys.stderr)
+        for pcap_file, code in failed:
+            print(f"  {pcap_file} (exit code {code})", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
