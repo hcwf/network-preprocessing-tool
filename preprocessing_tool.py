@@ -22,7 +22,7 @@ size_of_window = 10
 flows = {}
 
 # 1. Ejecutar tshark para extraer los datos del pcap a un archivo CSV
-def run_tshark(pcap_file, output_csv):
+def run_tshark(pcap_file, output_csv, session_reset=0):
     command = [
         "tshark", "-r", pcap_file, "-T", "fields",
         "-e", "ip.src", "-e", "ip.dst", "-e", "ip.proto", "-e", "frame.len", "-e", "tcp.flags",
@@ -34,6 +34,11 @@ def run_tshark(pcap_file, output_csv):
         "-E", "header=y", "-E", "separator=,", "-E", "quote=d", "-E", "occurrence=f"
 
     ]
+    if session_reset:
+        # tshark keeps state for every packet it has read (about 0.5-0.7 KB each), so memory grows without limit on
+        # a huge capture. -M N forgets that state every N packets. Only fields that depend on earlier packets are
+        # affected (tcp.analysis.initial_rtt of connections whose handshake lies before a reset).
+        command += ["-M", str(session_reset)]
 
     with open(output_csv, 'w') as f:
         try:
@@ -531,8 +536,8 @@ def _iter_chunk_results(chunks, mode, window_size, workers):
             conn.close()
 
 def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, mode,
-                 window_size=size_of_window, workers=1):
-    run_tshark(pcap_file, output_csv)
+                 window_size=size_of_window, workers=1, session_reset=0):
+    run_tshark(pcap_file, output_csv, session_reset)
     # The original loaded the whole packet table here in every mode, although only "paquetes" and
     # "all" use it. Now only those two modes touch the full file, and they do it chunk by chunk.
     if mode in ["paquetes", "all"]:
@@ -583,6 +588,11 @@ def main():
                              "0 = todos los núcleos). El resultado es idéntico; cada proceso necesita memoria "
                              "para unos pocos chunks de %d filas." % CHUNK_SIZE)
 
+    parser.add_argument("--session-reset", type=int, default=0, metavar="N",
+                        help="tshark -M N: olvidar el estado de tshark cada N paquetes para limitar la memoria en "
+                             "capturas enormes (por defecto: 0 = desactivado). Solo cambia campos que dependen de "
+                             "paquetes anteriores (tcp.analysis.initial_rtt).")
+
     # Parsear los argumentos
     args = parser.parse_args()
     workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
@@ -598,7 +608,7 @@ def main():
     output_combined_stats = paths["combinadas"]
 
     process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, args.mode,
-                 window_size=args.size_of_window, workers=workers)
+                 window_size=args.size_of_window, workers=workers, session_reset=args.session_reset)
 
 # The guard is required: worker processes import this file and must not run the analysis again.
 if __name__ == "__main__":
