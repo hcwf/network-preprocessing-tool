@@ -612,7 +612,10 @@ def main():
 
 # The guard is required: worker processes import this file and must not run the analysis again.
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:      # Ctrl-C: tshark and the workers are already stopped; no traceback
+        sys.exit(130)
 
 
 
