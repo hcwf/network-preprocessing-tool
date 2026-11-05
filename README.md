@@ -65,6 +65,21 @@ output was byte-identical to the original. Confirm this on your own data with `t
   same time and writes them back in order. The output is identical for any value. Each worker needs memory for
   one chunk (about a few GB; lower the value if the machine runs out of memory). The tshark pass that comes first
   is single-threaded and is not sped up. `workers > 1` needs the `fork` start method (Linux/macOS).
+- **One huge capture (`session_reset`).** tshark keeps state for every packet it has read, about 0.5-0.7 KB each
+  (measured with tshark 4.2.2 and this tool's fields), and only frees it when it ends. That is roughly 0.8 GB of
+  memory per GB of capture: a 2 GB file needs about 2 GB, an 80 GB file about as much as a 64 GB machine has, and
+  hundreds of GB cannot be processed in one run. `session_reset: N` in the `classic:` section (tshark's `-M N`)
+  makes tshark forget its state every N packets, which caps its memory at roughly 150 MB + N x 0.6 KB (for example
+  `session_reset: 50000000` is about 30 GB). Notes:
+  - Only fields that depend on earlier packets change: `tcp.analysis.initial_rtt` (and its window statistics
+    column) is empty for a connection whose handshake lies before a reset. On a real two-file sample, resetting
+    every 10,000 packets changed no other column. The fewer the resets, the fewer connections are affected, so pick
+    the largest N your memory allows.
+  - It is off by default (`0`), and then the tshark command is exactly as before. The tool prints a warning when
+    a capture looks too large for the installed memory and `session_reset` is not set.
+  - It works on one file at a time: with `jobs` above 1 every running capture needs its own memory.
+  - Check the effect on your data with
+    `python3 tools/compare_outputs.py out_plain out_reset --allow tcp.analysis.initial_rtt tcp_analysis_initial_rtt`.
 - **Many captures (`jobs`, `--resume`, `--keep-going`).** Give `miotta_npt.py` as many `.pcap`/`.pcapng` files
   as you like (a shell glob works); each is processed on its own and written to its own set of outputs.
   - `jobs: N` at the top level of the YAML processes N captures at the same time (default 1). The output of

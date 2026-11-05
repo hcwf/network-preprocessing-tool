@@ -5,6 +5,7 @@ output_dir: "./output"
 classic:
   mode: all      # Tipo de análisis (paquetes, ventana, flujos, combinada, all)
   size_of_window: 10     # Número de paquetes por ventana
+  # session_reset: 0     # Opcional. tshark olvida su estado cada N paquetes (tshark -M N) para limitar la memoria en capturas enormes; 0 = desactivado.
   # workers: 1           # Opcional. Chunks calculados a la vez (1 = secuencial; 0 = todos los núcleos). Mismo resultado.
 
 nprint:
