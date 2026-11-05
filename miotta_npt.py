@@ -8,9 +8,7 @@ import hashlib
 import json
 import signal
 import subprocess
-import threading
 import time
-import concurrent.futures
 
 try:
     import fcntl
@@ -29,7 +27,7 @@ def load_config(yaml_path):
 
 # Keys the tool reads, per section ("" = top level). Anything else in the YAML is ignored by the tool.
 KNOWN_KEYS = {
-    "": {"mode", "output_dir", "jobs", "classic", "nprint"},
+    "": {"mode", "output_dir", "classic", "nprint"},
     "classic": {"mode", "size_of_window", "workers", "session_reset", "tcp_reassembly"},
     "nprint": {"headers", "masks"},
 }
@@ -82,10 +80,6 @@ def validate_config(config):
     tcp_reassembly = (config.get("classic") or {}).get("tcp_reassembly", True)
     if not isinstance(tcp_reassembly, bool):
         raise ValueError(f"classic.tcp_reassembly must be true or false, got {tcp_reassembly!r}")
-
-    jobs = config.get("jobs", 1)
-    if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs < 1:
-        raise ValueError(f"jobs must be a whole number >= 1, got {jobs!r}")
 
     return warnings
 
@@ -147,7 +141,7 @@ STATE_FORMAT = 1   # raise if a change to the tool makes earlier results no long
 
 
 def settings_fingerprint(config):
-    """Hash of every setting that changes what is written. Settings that only change speed (workers, jobs) are left out."""
+    """Hash of every setting that changes what is written. Settings that only change speed (workers) are left out."""
     if config["mode"] == "classic":
         relevant = {"mode": "classic", "classic_mode": config["classic"]["mode"],
                     "size_of_window": config["classic"]["size_of_window"]}
@@ -235,43 +229,28 @@ def acquire_lock(config, pcap):
     return fd
 
 
-def process_capture(config, pcap, log=None):
-    """Run one capture and record that it finished. With a log file the child's output goes there."""
+def process_capture(config, pcap):
+    """Run one capture and record that it finished."""
     lock_fd = acquire_lock(config, pcap)
     try:
         identity = input_identity(pcap)   # taken before the run: a capture that changes meanwhile is not "finished"
         clear_marker(config, pcap)
         started = time.monotonic()
-        run_file(config, pcap, pass_fds=() if lock_fd is None else (lock_fd,), log=log)
+        run_file(config, pcap, pass_fds=() if lock_fd is None else (lock_fd,))
         write_marker(config, pcap, identity, time.monotonic() - started)
     finally:
         if lock_fd is not None:
             os.close(lock_fd)
 
 
-_active = set()          # processing children that are running right now
-_active_lock = threading.Lock()
-_shutting_down = threading.Event()   # set on interrupt: no new child may start afterwards
-
-
-def run_tracked(cmd, pass_fds=(), log=None):
-    """subprocess.run(cmd, check=True) that remembers the child so it can be stopped on interrupt.
-
-    With log=None the child writes to this terminal as before; with a file it gets stdout and stderr there.
-    """
-    with _active_lock:
-        if _shutting_down.is_set():
-            raise KeyboardInterrupt()
-        proc = subprocess.Popen(cmd, pass_fds=pass_fds, stdout=log, stderr=subprocess.STDOUT if log else None)
-        _active.add(proc)
+def run_tracked(cmd, pass_fds=()):
+    """subprocess.run(cmd, check=True) that stops the child when this process is interrupted (Ctrl-C / SIGTERM)."""
+    proc = subprocess.Popen(cmd, pass_fds=pass_fds)
     try:
         returncode = proc.wait()
     except BaseException:       # Ctrl-C / SIGTERM arrived while waiting: do not leave the child running
         stop_child(proc)
         raise
-    finally:
-        with _active_lock:
-            _active.discard(proc)
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, cmd)
 
@@ -286,19 +265,10 @@ def stop_child(proc):
             proc.wait()
 
 
-def stop_all_children():
-    with _active_lock:
-        _shutting_down.set()
-        procs = list(_active)
-    for proc in procs:
-        stop_child(proc)
-
-
-def run_file(config, pcap, pass_fds=(), log=None):
+def run_file(config, pcap, pass_fds=()):
     label, cmd = build_command(config, pcap)
-    if log is None:
-        print(f"Running {label} Preprocessing: {' '.join(cmd)}")
-    run_tracked(cmd, pass_fds=pass_fds, log=log)
+    print(f"Running {label} Preprocessing: {' '.join(cmd)}")
+    run_tracked(cmd, pass_fds=pass_fds)
 
 def check_inputs(mode, pcap_files):
     """Stop before any work starts if an input is missing or two captures would overwrite each other's output.
@@ -366,16 +336,10 @@ def main():
         if not files:
             print("Nothing left to do.")
 
-    jobs = min(config.get("jobs", 1), max(len(files), 1))
-    warn_if_oversubscribed(config, jobs)
     failed = []
     try:
-        if jobs > 1:
-            failed = process_parallel(config, files, jobs, args.keep_going)
-        else:
-            failed = process_sequentially(config, files, args.keep_going)
-    except KeyboardInterrupt:
-        stop_all_children()
+        failed = process_sequentially(config, files, args.keep_going)
+    except KeyboardInterrupt:      # the running child was already stopped by run_tracked
         sys.exit("\nInterrupted. Captures that were finished are kept; run again with --resume to continue.")
 
     if failed:
@@ -405,78 +369,6 @@ def warn_if_tshark_may_run_out_of_memory(config, files):
               f"({ram / 1e9:.0f} GB installed) and may be killed. Set classic.session_reset in the YAML "
               f"(e.g. 40000000 packets) and classic.tcp_reassembly: false to cap tshark's memory; only the RTT of "
               f"connections whose handshake lies before a reset is affected.", file=sys.stderr)
-
-
-def warn_if_oversubscribed(config, jobs):
-    workers = (config.get("classic") or {}).get("workers", 1) if config["mode"] == "classic" else 1
-    cores = os.cpu_count() or 1
-    effective = workers or cores
-    if jobs > 1 and jobs * effective > cores:
-        print(f"WARNING: jobs ({jobs}) x workers ({effective}) = {jobs * effective} busy processes, but this machine "
-              f"has {cores} CPU cores. The captures will compete; consider fewer jobs or workers. Memory also "
-              f"scales with jobs x workers.", file=sys.stderr)
-
-
-def log_path(config, pcap):
-    return marker_path(config, pcap)[:-5] + ".log"
-
-
-def process_parallel(config, files, jobs, keep_going):
-    """Process several captures at once. Each capture still runs in its own process exactly as when run alone."""
-    os.makedirs(os.path.join(config["output_dir"], STATE_DIR), exist_ok=True)
-    failed, stop = [], threading.Event()
-    done_count, print_lock = [0], threading.Lock()
-    total = len(files)
-
-    def say(text, err=False):
-        with print_lock:
-            print(text, file=sys.stderr if err else sys.stdout, flush=True)
-
-    def work(pcap):
-        if stop.is_set():
-            return pcap, "skipped"
-        path = log_path(config, pcap)
-        started = time.monotonic()
-        say(f"Started: {pcap}")
-        try:
-            with open(path, "w") as log:
-                process_capture(config, pcap, log=log)
-        except CaptureBusy:
-            return pcap, "busy"
-        except KeyboardInterrupt:
-            return pcap, "skipped"
-        except subprocess.CalledProcessError as e:
-            return pcap, e.returncode
-        os.remove(path)               # logs are only kept for failed captures
-        with print_lock:
-            done_count[0] += 1
-            n = done_count[0]
-        say(f"Finished [{n}/{total}] {pcap} ({time.monotonic() - started:.0f}s)")
-        return pcap, 0
-
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
-    try:
-        futures = [pool.submit(work, p) for p in files]
-        for future in concurrent.futures.as_completed(futures):
-            pcap, code = future.result()
-            if code in (0, "skipped"):
-                continue
-            failed.append((pcap, code))
-            if code == "busy":
-                say(f"ERROR: {pcap} is still being processed by another run. Wait for it and use --resume.", True)
-            else:
-                say(f"ERROR: {pcap} failed (exit code {code}). Its output is in {log_path(config, pcap)}", True)
-            if not keep_going and not stop.is_set():
-                stop.set()
-                say("Stopping: captures that have not started will be skipped (use --keep-going to continue after "
-                    "a failure); running ones finish.", True)
-    except KeyboardInterrupt:
-        stop.set()
-        pool.shutdown(wait=False, cancel_futures=True)
-        stop_all_children()
-        raise
-    pool.shutdown()
-    return failed
 
 
 def process_sequentially(config, files, keep_going):
