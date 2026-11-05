@@ -21,6 +21,7 @@ gaps between the two copies) and writes nothing.
 """
 import argparse
 import collections
+import contextlib
 import os
 import struct
 import sys
@@ -58,8 +59,12 @@ def comparison_key(data):
     return data.rstrip(b"\x00") if len(data) <= 60 else data
 
 
-def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True):
-    """Copy infile to outfile (None = report only) without the tagged twins. Returns (statistics, gap histogram)."""
+def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True, unmatched_tagged=None,
+          unmatched_untagged=None):
+    """Copy infile to outfile (None = report only) without the tagged twins. Returns (statistics, gap histogram).
+
+    unmatched_tagged / unmatched_untagged: optional binary files that receive the packets that found no twin.
+    """
     head = infile.read(24)
     if head[:4] == PCAPNG_MAGIC:
         sys.exit("ERROR: this is a pcapng file. Convert it first: editcap -F pcap input.pcapng output.pcap")
@@ -69,8 +74,9 @@ def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True):
     linktype = struct.unpack(endian + "I", head[20:24])[0] & 0x0FFFFFFF
     if linktype != 1:
         sys.exit(f"ERROR: only Ethernet captures (link type 1) are supported; this file has link type {linktype}.")
-    if outfile is not None:
-        outfile.write(head)
+    for side in (outfile, unmatched_tagged, unmatched_untagged):
+        if side is not None:
+            side.write(head)
 
     unpack_record = struct.Struct(endian + "IIII").unpack
     read = infile.read
@@ -102,8 +108,13 @@ def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True):
             if item[1] == UNDECIDED:
                 item[1] = KEEP
                 stats["tagged_without_twin"] += 1
+                if unmatched_tagged is not None:
+                    unmatched_tagged.write(item[0])
         for entries in recent_untagged.values():
             stats["untagged_without_twin"] += len(entries)
+            if unmatched_untagged is not None:
+                for entry in entries:
+                    unmatched_untagged.write(entry[2])
         pending_tagged.clear()
         order_tagged.clear()
         recent_untagged.clear()
@@ -140,6 +151,8 @@ def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True):
             if item[1] == UNDECIDED:
                 item[1] = KEEP
                 stats["tagged_without_twin"] += 1
+                if unmatched_tagged is not None:
+                    unmatched_tagged.write(item[0])
                 waiting = pending_tagged[key]
                 waiting.popleft()
                 if not waiting:
@@ -148,6 +161,8 @@ def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True):
             key, entry = order_untagged.popleft()
             if not entry[1]:
                 stats["untagged_without_twin"] += 1
+                if unmatched_untagged is not None:
+                    unmatched_untagged.write(entry[2])
                 recent = recent_untagged[key]
                 recent.popleft()
                 if not recent:
@@ -201,7 +216,7 @@ def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True):
                 gaps[gap_bucket(abs(timestamp - twin[2]))] += 1
                 stats["removed"] += 1
             else:
-                entry = [timestamp, False]
+                entry = [timestamp, False, raw]
                 recent_untagged.setdefault(key, collections.deque()).append(entry)
                 order_untagged.append((key, entry))
             queue.append([raw, KEEP, timestamp])
@@ -259,6 +274,9 @@ def main():
     parser.add_argument("--max-pending", type=int, default=1_000_000,
                         help="safety limit for packets waiting for a decision (default: 1000000)")
     parser.add_argument("--dry-run", action="store_true", help="only report what would be removed; write nothing")
+    parser.add_argument("--save-unmatched", metavar="PREFIX",
+                        help="also write the packets that found no twin to PREFIX_tagged.pcap and "
+                             "PREFIX_untagged.pcap, to look at them with tshark (works with --dry-run)")
     args = parser.parse_args()
 
     if not args.dry_run and not args.output:
@@ -271,13 +289,16 @@ def main():
     window_ns = int(args.window_us * 1000)
     vlans = set(args.vlan)
     partial = None if args.dry_run else args.output + ".part"
+    side_paths = [] if not args.save_unmatched else [args.save_unmatched + "_tagged.pcap",
+                                                      args.save_unmatched + "_untagged.pcap"]
     try:
-        with open(args.input, "rb", buffering=16 * 1024 * 1024) as infile:
-            if partial is None:
-                stats, gaps, other_vlans = dedup(infile, None, window_ns, vlans, args.max_pending)
-            else:
-                with open(partial, "wb", buffering=16 * 1024 * 1024) as outfile:
-                    stats, gaps, other_vlans = dedup(infile, outfile, window_ns, vlans, args.max_pending)
+        with contextlib.ExitStack() as files:
+            infile = files.enter_context(open(args.input, "rb", buffering=16 * 1024 * 1024))
+            outfile = files.enter_context(open(partial, "wb", buffering=16 * 1024 * 1024)) if partial else None
+            sides = [files.enter_context(open(path, "wb", buffering=4 * 1024 * 1024)) for path in side_paths]
+            stats, gaps, other_vlans = dedup(infile, outfile, window_ns, vlans, args.max_pending,
+                                             unmatched_tagged=sides[0] if sides else None,
+                                             unmatched_untagged=sides[1] if sides else None)
         if partial is not None:
             os.replace(partial, args.output)     # the output is either complete or absent
     except BaseException:
