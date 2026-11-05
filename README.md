@@ -94,6 +94,8 @@ output was byte-identical to the original. Confirm this on your own data with `t
   the original tool: windows and column types are decided per chunk.
 - **Check a change of your own** with the same tool: run both versions on one capture and
   `python3 tools/compare_outputs.py out_reference out_new`.
+  Add `--columns` to see which columns differ and in how many rows, and `--allow COLUMN ...` for columns that
+  are expected to differ (the exit status is then 0 if nothing else changed).
 
 ## 🛠️ YAML Configuration File
 
