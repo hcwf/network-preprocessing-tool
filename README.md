@@ -88,18 +88,9 @@ output was byte-identical to the original. Confirm this on your own data with `t
     with synthetic traffic, so treat it as the working explanation. None of the fields this tool extracts is produced
     by reassembly, and the output was identical on the test captures, but check it on a slice of your own data
     (`tools/compare_outputs.py`) before relying on it.
-- **Many captures (`--resume`, `--keep-going`).** Give `miotta_npt.py` as many `.pcap`/`.pcapng` files
-  as you like (a shell glob works); they are processed one after the other, each written to its own set of
-  outputs. Progress is printed as `Finished [k/total]`.
-  - `--resume` skips captures that were already processed with the same settings (the markers are in
-    `<output_dir>/.npt_state`). A capture counts as finished only if its marker exists, its input file has the same
-    size and modification time, and its output files are still there; anything else is processed again. Use it to
-    continue after an interruption or a failure, or to add newly recorded files to a finished batch. Without
-    `--resume` every listed capture is processed again.
-  - `--keep-going` carries on after a failed capture and lists the failures at the end (the exit status is 1).
-    Without it the run stops at the first failure.
-  - Ctrl-C and `kill` stop tshark/nPrint and the workers as well, and leave no marker for the capture that was
-    running. Two runs on the same `output_dir` cannot process the same capture at once (a lock file refuses it).
+- **Many captures.** Give `miotta_npt.py` as many `.pcap`/`.pcapng` files as you like (a shell glob works);
+  they are processed one after the other, each written to its own set of outputs. The run stops at the first
+  failure, and Ctrl-C and `kill` stop tshark/nPrint and the workers as well.
   - Two captures whose names would produce the same output files (e.g. `a/cap.pcap` and `b/cap.pcap`, or
     `cap.pcap` and `cap.pcapng`) are refused before anything runs.
 - **Disk is the limit, not memory.** The outputs themselves are large, and they are what the tool has always

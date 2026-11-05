@@ -121,7 +121,7 @@ def main():
     args = parser.parse_args()
     args.columns = args.columns or bool(args.allow)
 
-    # Hidden entries (such as .npt_state, the bookkeeping for --resume) are not results and are not compared.
+    # Hidden entries are not results and are not compared.
     names_a = {n for n in os.listdir(args.reference_dir) if not n.startswith(".")}
     names_b = {n for n in os.listdir(args.new_dir) if not n.startswith(".")}
     ok = True
