@@ -93,6 +93,30 @@ output was byte-identical to the original. Confirm this on your own data with `t
   failure, and Ctrl-C and `kill` stop tshark/nPrint and the workers as well.
   - Two captures whose names would produce the same output files (e.g. `a/cap.pcap` and `b/cap.pcap`, or
     `cap.pcap` and `cap.pcapng`) are refused before anything runs.
+- **Captures that contain every packet twice (`tools/dedup_pcap.py`).** Some captures record the same frame
+  twice, once untagged and once with an 802.1Q VLAN tag (for example traffic seen on an interface and on its VLAN
+  sub-interface). tshark counts both copies: packet, window and flow statistics are doubled, and TCP reassembly sees
+  every segment twice, which can make it slow down and use far more memory (see `tcp_reassembly`). To check, run
+  `tshark -r capture.pcap -T fields -e vlan.id | sort | uniq -c` on a slice: a near 50/50 split between an empty
+  value and `1` is the sign.
+  ```bash
+  python3 tools/dedup_pcap.py capture.pcap --dry-run                  # only report, write nothing
+  python3 tools/dedup_pcap.py capture.pcap capture_dedup.pcap         # then give capture_dedup.pcap to miotta_npt.py
+  ```
+  - It is a separate step that runs before `miotta_npt.py` and reads the file once, in order (about 300,000
+    packets/s; memory depends on the window, not on the file size). The packets it keeps are copied byte for byte
+    and in their original order.
+  - A packet is removed only if it carries a tag with one of the `--vlan` IDs (default `1`) and an untagged packet
+    with exactly the same bytes was recorded within `--window-us` (default 1000 microseconds). The match is
+    one-to-one and the untagged copy is the one kept, so two identical untagged packets are never merged, and
+    packets of other VLANs or without a twin are kept. The report shows the time between the two copies of
+    each pair (use `--dry-run` to choose the window), the number of tagged packets without an untagged twin, and
+    so on.
+  - **The features change on purpose**: a deduplicated capture gives different statistics from the same capture
+    without it, so datasets made with and without this step are not comparable. The untagged copy is kept because
+    this tool derives `IPV4` from `eth.type`, which is `0x8100` for tagged frames.
+  - It reads classic `.pcap` files with Ethernet frames. Convert a pcapng file first with
+    `editcap -F pcap input.pcapng output.pcap`. The output is written to `<output>.part` and renamed when complete.
 - **Disk is the limit, not memory.** The outputs themselves are large, and they are what the tool has always
   written. Rough sizes, measured on synthetic traffic, so measure a small slice of your own capture first:
   the packet table `paquetes_*.csv` takes about 135 bytes per packet, and the flow statistics
@@ -150,7 +174,8 @@ miotta-npt/
 ├── preprocessing_tool.py         # Statistical processing
 ├── preprocessing_tool_nprint.py  # Processing with nPrint
 ├── tools/
-│   └── compare_outputs.py        # byte-for-byte comparison of two output folders
+│   ├── compare_outputs.py        # byte-for-byte comparison of two output folders
+│   └── dedup_pcap.py             # removes untagged/VLAN-tagged duplicate packets from a pcap
 ├── config/
 │   ├── example_config.yaml
 │   └── iomt_ids_window100.yaml   # configuration of the published datasets
