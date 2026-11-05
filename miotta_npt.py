@@ -30,7 +30,7 @@ def load_config(yaml_path):
 # Keys the tool reads, per section ("" = top level). Anything else in the YAML is ignored by the tool.
 KNOWN_KEYS = {
     "": {"mode", "output_dir", "jobs", "classic", "nprint"},
-    "classic": {"mode", "size_of_window", "workers", "session_reset"},
+    "classic": {"mode", "size_of_window", "workers", "session_reset", "tcp_reassembly"},
     "nprint": {"headers", "masks"},
 }
 
@@ -79,6 +79,10 @@ def validate_config(config):
     if isinstance(session_reset, bool) or not isinstance(session_reset, int) or session_reset < 0:
         raise ValueError(f"classic.session_reset must be a whole number >= 0 (0 = off), got {session_reset!r}")
 
+    tcp_reassembly = (config.get("classic") or {}).get("tcp_reassembly", True)
+    if not isinstance(tcp_reassembly, bool):
+        raise ValueError(f"classic.tcp_reassembly must be true or false, got {tcp_reassembly!r}")
+
     jobs = config.get("jobs", 1)
     if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs < 1:
         raise ValueError(f"jobs must be a whole number >= 1, got {jobs!r}")
@@ -88,6 +92,11 @@ def validate_config(config):
 def session_reset_packets(config):
     """Packets after which tshark forgets its state (classic mode only; 0 = never, as before)."""
     return config["classic"].get("session_reset", 0) if config["mode"] == "classic" else 0
+
+
+def tcp_reassembly_enabled(config):
+    """False when tshark must not reassemble TCP streams (classic mode only; default True = as before)."""
+    return config["classic"].get("tcp_reassembly", True) if config["mode"] == "classic" else True
 
 
 def build_command(config, pcap):
@@ -109,6 +118,8 @@ def build_command(config, pcap):
         ]
         if session_reset_packets(config):
             cmd += ["--session-reset", str(session_reset_packets(config))]
+        if not tcp_reassembly_enabled(config):
+            cmd += ["--no-tcp-reassembly"]
         return "Classic", cmd
 
     headers = config["nprint"]["headers"]
@@ -144,6 +155,8 @@ def settings_fingerprint(config):
         relevant = {"mode": "nprint", "headers": config["nprint"]["headers"], "masks": config["nprint"]["masks"]}
     if session_reset_packets(config):      # only when on, so results made without it stay valid for --resume
         relevant["session_reset"] = session_reset_packets(config)
+    if not tcp_reassembly_enabled(config):
+        relevant["tcp_reassembly"] = False
     relevant["state_format"] = STATE_FORMAT
     return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -390,8 +403,8 @@ def warn_if_tshark_may_run_out_of_memory(config, files):
         print(f"WARNING: {len(big)} capture(s) are large for this machine (largest: {path}, {size / 1e9:.0f} GB). "
               f"tshark needs roughly {size * TSHARK_GB_PER_CAPTURE_GB / 1e9:.0f} GB of memory for it "
               f"({ram / 1e9:.0f} GB installed) and may be killed. Set classic.session_reset in the YAML "
-              f"(e.g. 50000000 packets) to cap tshark's memory; only the RTT of connections whose handshake lies "
-              f"before a reset is affected.", file=sys.stderr)
+              f"(e.g. 40000000 packets) and classic.tcp_reassembly: false to cap tshark's memory; only the RTT of "
+              f"connections whose handshake lies before a reset is affected.", file=sys.stderr)
 
 
 def warn_if_oversubscribed(config, jobs):
