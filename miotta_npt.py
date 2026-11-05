@@ -30,7 +30,7 @@ def load_config(yaml_path):
 # Keys the tool reads, per section ("" = top level). Anything else in the YAML is ignored by the tool.
 KNOWN_KEYS = {
     "": {"mode", "output_dir", "jobs", "classic", "nprint"},
-    "classic": {"mode", "size_of_window", "workers"},
+    "classic": {"mode", "size_of_window", "workers", "session_reset"},
     "nprint": {"headers", "masks"},
 }
 
@@ -75,11 +75,20 @@ def validate_config(config):
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 0:
         raise ValueError(f"classic.workers must be a whole number >= 0 (0 = all cores), got {workers!r}")
 
+    session_reset = (config.get("classic") or {}).get("session_reset", 0)
+    if isinstance(session_reset, bool) or not isinstance(session_reset, int) or session_reset < 0:
+        raise ValueError(f"classic.session_reset must be a whole number >= 0 (0 = off), got {session_reset!r}")
+
     jobs = config.get("jobs", 1)
     if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs < 1:
         raise ValueError(f"jobs must be a whole number >= 1, got {jobs!r}")
 
     return warnings
+
+def session_reset_packets(config):
+    """Packets after which tshark forgets its state (classic mode only; 0 = never, as before)."""
+    return config["classic"].get("session_reset", 0) if config["mode"] == "classic" else 0
+
 
 def build_command(config, pcap):
     """Return (label, command line) that processes one capture with the configured mode."""
@@ -98,6 +107,8 @@ def build_command(config, pcap):
             "--output_dir", output_dir,  # results are written there directly
             "--workers", str(workers)
         ]
+        if session_reset_packets(config):
+            cmd += ["--session-reset", str(session_reset_packets(config))]
         return "Classic", cmd
 
     headers = config["nprint"]["headers"]
@@ -131,6 +142,8 @@ def settings_fingerprint(config):
                     "size_of_window": config["classic"]["size_of_window"]}
     else:
         relevant = {"mode": "nprint", "headers": config["nprint"]["headers"], "masks": config["nprint"]["masks"]}
+    if session_reset_packets(config):      # only when on, so results made without it stay valid for --resume
+        relevant["session_reset"] = session_reset_packets(config)
     relevant["state_format"] = STATE_FORMAT
     return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -329,6 +342,7 @@ def main():
         sys.exit(f"ERROR ({args.config}): unsupported mode {mode!r} (use 'classic' or 'nprint')")
 
     files = check_inputs(mode, args.pcap_files)
+    warn_if_tshark_may_run_out_of_memory(config, files)
     os.makedirs(config["output_dir"], exist_ok=True)
 
     if args.resume:
@@ -356,6 +370,28 @@ def main():
         for pcap_file, code in failed:
             print(f"  {pcap_file} ({'busy' if code == 'busy' else f'exit code {code}'})", file=sys.stderr)
         sys.exit(1)
+
+
+# Measured with tshark 4.2.2 and the fields of this tool: its memory grows by about 0.5-0.7 KB per packet, i.e. about
+# 0.8 GB per GB of capture for typical packet sizes, and it is only released when tshark ends or resets (-M).
+TSHARK_GB_PER_CAPTURE_GB = 0.8
+
+
+def warn_if_tshark_may_run_out_of_memory(config, files):
+    if config["mode"] != "classic" or session_reset_packets(config):
+        return
+    try:
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return
+    big = [(os.path.getsize(p), p) for p in files if os.path.getsize(p) * TSHARK_GB_PER_CAPTURE_GB > ram / 2]
+    if big:
+        size, path = max(big)
+        print(f"WARNING: {len(big)} capture(s) are large for this machine (largest: {path}, {size / 1e9:.0f} GB). "
+              f"tshark needs roughly {size * TSHARK_GB_PER_CAPTURE_GB / 1e9:.0f} GB of memory for it "
+              f"({ram / 1e9:.0f} GB installed) and may be killed. Set classic.session_reset in the YAML "
+              f"(e.g. 50000000 packets) to cap tshark's memory; only the RTT of connections whose handshake lies "
+              f"before a reset is affected.", file=sys.stderr)
 
 
 def warn_if_oversubscribed(config, jobs):
