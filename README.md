@@ -112,6 +112,8 @@ output was byte-identical to the original. Confirm this on your own data with `t
     packets of other VLANs or without a twin are kept. The report shows the time between the two copies of
     each pair (use `--dry-run` to choose the window), the number of tagged packets without an untagged twin, and
     so on.
+    `--save-unmatched PREFIX` also writes the packets that found no twin to `PREFIX_tagged.pcap` and
+    `PREFIX_untagged.pcap`, so you can look at them with tshark (for example `tshark -r PREFIX_tagged.pcap -q -z io,phs`).
   - **The features change on purpose**: a deduplicated capture gives different statistics from the same capture
     without it, so datasets made with and without this step are not comparable. The untagged copy is kept because
     this tool derives `IPV4` from `eth.type`, which is `0x8100` for tagged frames.
