@@ -69,8 +69,9 @@ output was byte-identical to the original. Confirm this on your own data with `t
   (measured with tshark 4.2.2 and this tool's fields), and only frees it when it ends. That is roughly 0.8 GB of
   memory per GB of capture: a 2 GB file needs about 2 GB, an 80 GB file about as much as a 64 GB machine has, and
   hundreds of GB cannot be processed in one run. `session_reset: N` in the `classic:` section (tshark's `-M N`)
-  makes tshark forget its state every N packets, which caps its memory at roughly 150 MB + N x 0.6 KB (for example
-  `session_reset: 50000000` is about 30 GB). Notes:
+  makes tshark forget its state every N packets. With ordinary traffic that caps its memory at roughly
+  150 MB + N x 0.6 KB (for example `session_reset: 40000000` is about 25-30 GB), but see `tcp_reassembly` below: a
+  stream that never completes can use far more than that between two resets. Notes:
   - Only fields that depend on earlier packets change: `tcp.analysis.initial_rtt` (and its window statistics
     column) is empty for a connection whose handshake lies before a reset. On a real two-file sample, resetting
     every 10,000 packets changed no other column. The fewer the resets, the fewer connections are affected, so pick
@@ -80,6 +81,14 @@ output was byte-identical to the original. Confirm this on your own data with `t
   - It works on one file at a time: with `jobs` above 1 every running capture needs its own memory.
   - Check the effect on your data with
     `python3 tools/compare_outputs.py out_plain out_reset --allow tcp.analysis.initial_rtt tcp_analysis_initial_rtt`.
+  - **`tcp_reassembly: false`** (tshark `-o tcp.desegment_tcp_streams:FALSE`, default `true` = as before) stops tshark
+    from reassembling TCP streams. On a real merged capture of about 56M+ packets, tshark reached 46 GB with 16M
+    packets since the last reset and slowed from ~18,000 to ~100 packets/s, while it printed `Adding
+    tcp.segment.overlap would put more than 1000000 items in the tree`. The likely cause is a TCP stream whose
+    upper-layer data never completes, which makes tshark keep (and list) every segment; this was not reproduced
+    with synthetic traffic, so treat it as the working explanation. None of the fields this tool extracts is produced
+    by reassembly, and the output was identical on the test captures, but check it on a slice of your own data
+    (`tools/compare_outputs.py`) before relying on it.
 - **Many captures (`jobs`, `--resume`, `--keep-going`).** Give `miotta_npt.py` as many `.pcap`/`.pcapng` files
   as you like (a shell glob works); each is processed on its own and written to its own set of outputs.
   - `jobs: N` at the top level of the YAML processes N captures at the same time (default 1). The output of
