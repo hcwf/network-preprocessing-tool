@@ -2,18 +2,9 @@ import os
 import sys
 import yaml
 import argparse
-import datetime
 import difflib
-import hashlib
-import json
 import signal
 import subprocess
-import time
-
-try:
-    import fcntl
-except ImportError:   # Windows: no protection against two runs working on the same capture
-    fcntl = None
 
 import npt_naming
 
@@ -129,123 +120,9 @@ def build_command(config, pcap):
     ]
     return "nPrint", cmd
 
-# --- Which captures are already finished (for --resume) -------------------------------------------------------
-#
-# When a capture has been processed successfully, a small marker file is written to <output_dir>/.npt_state/.
-# It is removed again when the capture is started, so a run that is interrupted half way is never taken for a
-# finished one. --resume skips a capture only if its marker matches the current settings and input file and the
-# statistics files still exist.
-
-STATE_DIR = ".npt_state"
-STATE_FORMAT = 1   # raise if a change to the tool makes earlier results no longer interchangeable
-
-
-def settings_fingerprint(config):
-    """Hash of every setting that changes what is written. Settings that only change speed (workers) are left out."""
-    if config["mode"] == "classic":
-        relevant = {"mode": "classic", "classic_mode": config["classic"]["mode"],
-                    "size_of_window": config["classic"]["size_of_window"]}
-    else:
-        relevant = {"mode": "nprint", "headers": config["nprint"]["headers"], "masks": config["nprint"]["masks"]}
-    if session_reset_packets(config):      # only when on, so results made without it stay valid for --resume
-        relevant["session_reset"] = session_reset_packets(config)
-    if not tcp_reassembly_enabled(config):
-        relevant["tcp_reassembly"] = False
-    relevant["state_format"] = STATE_FORMAT
-    return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
-
-
-def marker_path(config, pcap):
-    mode = config["mode"]
-    return os.path.join(config["output_dir"], STATE_DIR, f"{mode}_{npt_naming.output_key(mode, pcap)}.json")
-
-
-def required_outputs(config, pcap):
-    output_dir = config["output_dir"]
-    if config["mode"] == "classic":
-        paths = npt_naming.classic_output_paths(pcap, output_dir)
-        return [paths[kind] for kind in npt_naming.CLASSIC_REQUIRED[config["classic"]["mode"]]]
-    return [npt_naming.nprint_output_path(pcap, output_dir)]
-
-
-def input_identity(pcap):
-    info = os.stat(pcap)
-    return {"size": info.st_size, "mtime_ns": info.st_mtime_ns}
-
-
-def is_finished(config, pcap):
-    try:
-        with open(marker_path(config, pcap)) as f:
-            marker = json.load(f)
-    except (OSError, ValueError):
-        return False
-    identity = input_identity(pcap)
-    return (marker.get("fingerprint") == settings_fingerprint(config)
-            and marker.get("size") == identity["size"] and marker.get("mtime_ns") == identity["mtime_ns"]
-            and all(os.path.exists(path) for path in required_outputs(config, pcap)))
-
-
-def clear_marker(config, pcap):
-    try:
-        os.remove(marker_path(config, pcap))
-    except FileNotFoundError:
-        pass
-
-
-def write_marker(config, pcap, identity, seconds):
-    path = marker_path(config, pcap)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    marker = {"input": os.path.abspath(pcap), **identity, "fingerprint": settings_fingerprint(config),
-              "seconds": round(seconds, 1),
-              "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(marker, f, indent=1)
-    os.replace(tmp, path)   # a marker is either complete or absent
-
-
-class CaptureBusy(Exception):
-    """Another process is still working on this capture's output files."""
-
-
-def acquire_lock(config, pcap):
-    """Take an exclusive lock on this capture's outputs and return its file descriptor (None if unsupported).
-
-    The processing child inherits the descriptor, so the lock is held for as long as the child runs, even if
-    this script is killed in the meantime. That matters because killing the script does not stop a child that
-    is already running: starting the same capture again (--resume) while it is still writing would mix the
-    output of two runs.
-    """
-    if fcntl is None:
-        return None
-    path = marker_path(config, pcap)[:-len(".json")] + ".lock"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        raise CaptureBusy(pcap)
-    return fd
-
-
-def process_capture(config, pcap):
-    """Run one capture and record that it finished."""
-    lock_fd = acquire_lock(config, pcap)
-    try:
-        identity = input_identity(pcap)   # taken before the run: a capture that changes meanwhile is not "finished"
-        clear_marker(config, pcap)
-        started = time.monotonic()
-        run_file(config, pcap, pass_fds=() if lock_fd is None else (lock_fd,))
-        write_marker(config, pcap, identity, time.monotonic() - started)
-    finally:
-        if lock_fd is not None:
-            os.close(lock_fd)
-
-
-def run_tracked(cmd, pass_fds=()):
+def run_tracked(cmd):
     """subprocess.run(cmd, check=True) that stops the child when this process is interrupted (Ctrl-C / SIGTERM)."""
-    proc = subprocess.Popen(cmd, pass_fds=pass_fds)
+    proc = subprocess.Popen(cmd)
     try:
         returncode = proc.wait()
     except BaseException:       # Ctrl-C / SIGTERM arrived while waiting: do not leave the child running
@@ -265,10 +142,10 @@ def stop_child(proc):
             proc.wait()
 
 
-def run_file(config, pcap, pass_fds=()):
+def run_file(config, pcap):
     label, cmd = build_command(config, pcap)
     print(f"Running {label} Preprocessing: {' '.join(cmd)}")
-    run_tracked(cmd, pass_fds=pass_fds)
+    run_tracked(cmd)
 
 def check_inputs(mode, pcap_files):
     """Stop before any work starts if an input is missing or two captures would overwrite each other's output.
@@ -302,15 +179,9 @@ def main():
     parser = argparse.ArgumentParser(description="Unified preprocessor for IoMT traffic")
     parser.add_argument("pcap_files", type=str, nargs='+', help="Paths to the input PCAP files")
     parser.add_argument('--config', required=True, help="Path to YAML configuration file")
-    parser.add_argument('--keep-going', action='store_true',
-                        help="If a capture fails, carry on with the others and report the failures at the end "
-                             "(default: stop at the first failure)")
-    parser.add_argument('--resume', action='store_true',
-                        help="Skip captures that were already processed successfully with the same settings "
-                             "(recorded in <output_dir>/.npt_state). Without it every listed capture is processed again.")
     args = parser.parse_args()
 
-    # SIGTERM (kill, systemd, a closing job scheduler) is handled like Ctrl-C: stop the children, leave no marker.
+    # SIGTERM (kill, systemd, a closing job scheduler) is handled like Ctrl-C: stop the children, stop the children.
     signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     config = load_config(args.config)
@@ -328,25 +199,12 @@ def main():
     warn_if_tshark_may_run_out_of_memory(config, files)
     os.makedirs(config["output_dir"], exist_ok=True)
 
-    if args.resume:
-        done = {p for p in files if is_finished(config, p)}
-        if done:
-            print(f"Resume: {len(done)} of {len(files)} capture(s) are already finished and are skipped.")
-        files = [p for p in files if p not in done]
-        if not files:
-            print("Nothing left to do.")
-
-    failed = []
     try:
-        failed = process_sequentially(config, files, args.keep_going)
+        process_sequentially(config, files)
     except KeyboardInterrupt:      # the running child was already stopped by run_tracked
-        sys.exit("\nInterrupted. Captures that were finished are kept; run again with --resume to continue.")
-
-    if failed:
-        print(f"\n{len(failed)} of {len(files)} capture(s) failed:", file=sys.stderr)
-        for pcap_file, code in failed:
-            print(f"  {pcap_file} ({'busy' if code == 'busy' else f'exit code {code}'})", file=sys.stderr)
-        sys.exit(1)
+        sys.exit("\nInterrupted.")
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"ERROR: processing failed (exit code {e.returncode}).")
 
 
 # Measured with tshark 4.2.2 and the fields of this tool: its memory grows by about 0.5-0.7 KB per packet, i.e. about
@@ -371,27 +229,10 @@ def warn_if_tshark_may_run_out_of_memory(config, files):
               f"connections whose handshake lies before a reset is affected.", file=sys.stderr)
 
 
-def process_sequentially(config, files, keep_going):
-    failed = []
-    for index, pcap_file in enumerate(files, 1):
+def process_sequentially(config, files):
+    for pcap_file in files:
         print(f"Processing file: {pcap_file}")
-        try:
-            process_capture(config, pcap_file)
-        except (subprocess.CalledProcessError, CaptureBusy) as e:
-            if isinstance(e, CaptureBusy):
-                failed.append((pcap_file, "busy"))
-                print(f"ERROR: {pcap_file} is still being processed by another run (for example a run that was "
-                      f"killed but whose processing has not ended yet). Wait for it and use --resume.", file=sys.stderr)
-            else:
-                failed.append((pcap_file, e.returncode))
-                print(f"ERROR: {pcap_file} failed (exit code {e.returncode}).", file=sys.stderr)
-            if not keep_going:
-                not_started = len(files) - index
-                if not_started:
-                    print(f"Stopping: {not_started} capture(s) were not started (use --keep-going to continue "
-                          f"after a failure).", file=sys.stderr)
-                break
-    return failed
+        run_file(config, pcap_file)
 
 if __name__ == "__main__":
     main()

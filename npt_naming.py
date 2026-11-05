@@ -28,18 +28,6 @@ def nprint_output_path(pcap_file, output_dir):
     return os.path.join(output_dir, os.path.basename(pcap_file) + ".csv")
 
 
-# Files that must exist for a capture to count as finished, per classic mode. The packet table is only
-# required where it is itself a requested output (paquetes, all): in the other modes it is an intermediate
-# that may be deleted to save disk without making a finished capture look unfinished.
-CLASSIC_REQUIRED = {
-    "paquetes": ["paquetes"],
-    "ventana": ["ventanas"],
-    "flujos": ["flujo"],
-    "combinada": ["combinadas"],
-    "all": ["paquetes", "ventanas", "flujo", "combinadas"],
-}
-
-
 def output_key(mode, pcap_file):
     """Identifier that is unique per output set: two captures with the same key would overwrite each other."""
     if mode == "classic":
