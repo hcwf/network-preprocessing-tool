@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import yaml
 import argparse
@@ -19,7 +20,7 @@ def load_config(yaml_path):
 # Keys the tool reads, per section ("" = top level). Anything else in the YAML is ignored by the tool.
 KNOWN_KEYS = {
     "": {"mode", "output_dir", "classic", "nprint"},
-    "classic": {"mode", "size_of_window", "workers", "session_reset", "tcp_reassembly"},
+    "classic": {"mode", "size_of_window", "workers", "session_reset", "tcp_reassembly", "disable_protocols"},
     "nprint": {"headers", "masks"},
 }
 
@@ -72,6 +73,12 @@ def validate_config(config):
     if not isinstance(tcp_reassembly, bool):
         raise ValueError(f"classic.tcp_reassembly must be true or false, got {tcp_reassembly!r}")
 
+    protocols = (config.get("classic") or {}).get("disable_protocols", [])
+    if (not isinstance(protocols, list)
+            or not all(isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in protocols)):
+        raise ValueError(f"classic.disable_protocols must be a list of tshark protocol names such as [smb2, nbss], "
+                         f"got {protocols!r}")
+
     return warnings
 
 def session_reset_packets(config):
@@ -82,6 +89,11 @@ def session_reset_packets(config):
 def tcp_reassembly_enabled(config):
     """False when tshark must not reassemble TCP streams (classic mode only; default True = as before)."""
     return config["classic"].get("tcp_reassembly", True) if config["mode"] == "classic" else True
+
+
+def disabled_protocols(config):
+    """tshark protocol names whose dissectors are switched off (classic mode only; default none = as before)."""
+    return list(config["classic"].get("disable_protocols", [])) if config["mode"] == "classic" else []
 
 
 def build_command(config, pcap):
@@ -105,6 +117,8 @@ def build_command(config, pcap):
             cmd += ["--session-reset", str(session_reset_packets(config))]
         if not tcp_reassembly_enabled(config):
             cmd += ["--no-tcp-reassembly"]
+        for protocol in disabled_protocols(config):
+            cmd += ["--disable-protocol", protocol]
         return "Classic", cmd
 
     headers = config["nprint"]["headers"]

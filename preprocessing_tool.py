@@ -22,7 +22,7 @@ size_of_window = 10
 flows = {}
 
 # 1. Ejecutar tshark para extraer los datos del pcap a un archivo CSV
-def run_tshark(pcap_file, output_csv, session_reset=0, tcp_reassembly=True):
+def run_tshark(pcap_file, output_csv, session_reset=0, tcp_reassembly=True, disabled_protocols=()):
     command = [
         "tshark", "-r", pcap_file, "-T", "fields",
         "-e", "ip.src", "-e", "ip.dst", "-e", "ip.proto", "-e", "frame.len", "-e", "tcp.flags",
@@ -45,6 +45,12 @@ def run_tshark(pcap_file, output_csv, session_reset=0, tcp_reassembly=True):
         # memory and time per packet grow without bound, and "Adding tcp.segment.overlap would put more than
         # 1000000 items in the tree" warnings appear. None of the fields extracted here depends on reassembly.
         command += ["-o", "tcp.desegment_tcp_streams:FALSE"]
+    for protocol in disabled_protocols:
+        # Some application-layer dissectors keep state that grows with the connection and is searched again for every
+        # packet (a long SMB2 transfer made tshark take 10 minutes for 500,000 packets instead of 4 seconds). None of
+        # the fields extracted here belongs to an application-layer protocol, so switching such a dissector off does
+        # not change them. The default is to disable nothing, as before.
+        command += ["--disable-protocol", protocol]
 
     with open(output_csv, 'w') as f:
         try:
@@ -542,8 +548,8 @@ def _iter_chunk_results(chunks, mode, window_size, workers):
             conn.close()
 
 def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, mode,
-                 window_size=size_of_window, workers=1, session_reset=0, tcp_reassembly=True):
-    run_tshark(pcap_file, output_csv, session_reset, tcp_reassembly)
+                 window_size=size_of_window, workers=1, session_reset=0, tcp_reassembly=True, disabled_protocols=()):
+    run_tshark(pcap_file, output_csv, session_reset, tcp_reassembly, disabled_protocols)
     # The original loaded the whole packet table here in every mode, although only "paquetes" and
     # "all" use it. Now only those two modes touch the full file, and they do it chunk by chunk.
     if mode in ["paquetes", "all"]:
@@ -603,6 +609,11 @@ def main():
                         help="tshark -o tcp.desegment_tcp_streams:FALSE: no reasamblado TCP (evita el crecimiento sin "
                              "límite de memoria y tiempo con flujos que nunca se completan). No cambia los campos extraídos.")
 
+    parser.add_argument("--disable-protocol", action="append", default=[], metavar="NAME", dest="disable_protocol",
+                        help="tshark --disable-protocol NAME (se puede repetir, p. ej. smb2 y nbss): desactiva un "
+                             "disector de capa de aplicación cuyo coste crece con la conexión. No cambia los campos "
+                             "extraídos (ninguno pertenece a la capa de aplicación). Por defecto no se desactiva ninguno.")
+
     # Parsear los argumentos
     args = parser.parse_args()
     workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
@@ -619,7 +630,7 @@ def main():
 
     process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, args.mode,
                  window_size=args.size_of_window, workers=workers, session_reset=args.session_reset,
-                     tcp_reassembly=not args.no_tcp_reassembly)
+                 tcp_reassembly=not args.no_tcp_reassembly, disabled_protocols=args.disable_protocol)
 
 # The guard is required: worker processes import this file and must not run the analysis again.
 if __name__ == "__main__":
