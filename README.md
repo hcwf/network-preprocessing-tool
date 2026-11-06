@@ -93,6 +93,18 @@ output was byte-identical to the original. Confirm this on your own data with `t
   failure, and Ctrl-C and `kill` stop tshark/nPrint and the workers as well.
   - Two captures whose names would produce the same output files (e.g. `a/cap.pcap` and `b/cap.pcap`, or
     `cap.pcap` and `cap.pcapng`) are refused before anything runs.
+- **A long transfer makes tshark slower and slower (`disable_protocols`).** Some application-layer dissectors keep
+  state that grows with a connection and is searched again for every packet, so the time per packet grows with the
+  length of the connection. On one real part of 3.57M packets, a single SMB2 file transfer (367,000 packets in a
+  500,000-packet slice) made tshark take 9 min 50 s for the slice; with `--disable-protocol smb2 --disable-protocol
+  nbss` it took 4 s. `disable_protocols: [smb2, nbss]` in the `classic:` section (or `--disable-protocol NAME`,
+  repeatable, on `preprocessing_tool.py`) switches such dissectors off. Default: none, and then the tshark command is
+  exactly as before. None of the fields this tool extracts belongs to an application-layer protocol, but check it on
+  a slice that contains the transfer, with `tools/compare_outputs.py`, before relying on it. To find out whether a
+  part is affected, time `tshark -r part.pcap -T fields -e frame.len | awk 'NR%25000==0{print NR, strftime("%T")}'`:
+  steadily growing gaps between the lines are the sign. `tcpdump -nn -q -r part.pcap | grep -o 'IP [0-9.]*\.[0-9]* > [0-9.]*\.[0-9]*' | sort | uniq -c | sort -rn | head`
+  shows the busiest connections, and the port tells which dissector to try. The protocol names are those of
+  `tshark -G protocols` (third column).
 - **Captures that contain every packet twice (`tools/dedup_pcap.py`).** Some captures record the same frame
   twice, once untagged and once with an 802.1Q VLAN tag (for example traffic seen on an interface and on its VLAN
   sub-interface). tshark counts both copies: packet, window and flow statistics are doubled, and TCP reassembly sees
