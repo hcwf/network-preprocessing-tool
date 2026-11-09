@@ -25,7 +25,7 @@ def run_classic(config, pcap):
         "--size_of_window", str(size),
         "--mode", mode,
         "--output_dir", output_dir,  # results are written there directly
-        "--disable_smb_dissection", dissection
+        "--disable_smb_dissection", str(dissection)
     ]
 
     print(f"Running Classic Preprocessing: {' '.join(cmd)}")
