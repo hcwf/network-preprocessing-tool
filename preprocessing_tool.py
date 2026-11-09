@@ -57,7 +57,7 @@ def run_tshark(pcap_file, output_csv):
         "-E", "header=y", "-E", "separator=,", "-E", "quote=d", "-E", "occurrence=f"
     ]
     if args.disable_smb_dissection == True:
-        command += "--disable-protocol", "[smb, smb2, nbss]"
+        command += "--disable-protocol", "smb,smb2,nbss"  # Disables the dissection of SMB protocols.
 
     with open(output_csv, 'w') as f:
         try:
