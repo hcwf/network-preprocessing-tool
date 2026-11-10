@@ -126,6 +126,13 @@ output was byte-identical to the original. Confirm this on your own data with `t
     so on.
     `--save-unmatched PREFIX` also writes the packets that found no twin to `PREFIX_tagged.pcap` and
     `PREFIX_untagged.pcap`, so you can look at them with tshark (for example `tshark -r PREFIX_tagged.pcap -q -z io,phs`).
+  - `-` as input and/or output means standard input and/or standard output, so the step fits into a pipe and no
+    merged or intermediate file has to be stored. The report is then printed on standard error. For a capture
+    that is split into many files (`-a` appends them in the given order, so list them in recording order):
+    ```bash
+    mergecap -a -F pcap -w - part_*.pcap | python3 tools/dedup_pcap.py - - | tcpdump -r - -w dedup.pcap -C 2000
+    ```
+    A pipe cannot be renamed at the end like a file, so check the exit status (`set -o pipefail` in a script).
   - **The features change on purpose**: a deduplicated capture gives different statistics from the same capture
     without it, so datasets made with and without this step are not comparable. The untagged copy is kept because
     this tool derives `IPV4` from `eth.type`, which is `0x8100` for tagged frames.
