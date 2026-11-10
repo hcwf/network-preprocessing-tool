@@ -64,7 +64,7 @@ def main():
     if runner is None:
         raise ValueError(f"Unsupported mode: {config['mode']}")
 
-    with (ThreadPoolExecutor(max_workers=config.get("threads", 4)) as executor):
+    with (ThreadPoolExecutor(max_workers=config.get("threads", 1)) as executor):
         results = executor.map(lambda pcap: runner(config, pcap), args.pcap_files)
         for pcap_file, _ in zip(args.pcap_files, results):
             print(f"Finished: {pcap_file}")

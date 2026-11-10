@@ -1,6 +1,6 @@
 mode: "nprint"              # "nprint" o "classic"
 output_dir: "./output"
-threads: 6  # default = 4, limited by the cores of your CPU
+threads: 6  # default = 1, limited by the cores of your CPU
 
 classic:
   mode: all      # Tipo de análisis (paquetes, ventana, flujos, combinada, all)
