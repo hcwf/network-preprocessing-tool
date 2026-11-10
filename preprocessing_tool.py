@@ -1,9 +1,6 @@
 import subprocess
-import dpkt
 import pandas as pd
-from functools import reduce
 import numpy as np
-from scipy import stats
 import argparse
 import os
 
@@ -89,7 +86,6 @@ def process_windows(df, window_size=size_of_window):
     df['tcp_flags_cwr'] = df['tcp.flags.cwr']
     df['tcp_flags_ece'] = df['tcp.flags.ece']
     df['TCP_Urgent_Pointer'] = df['tcp.urgent_pointer'].astype(float)  # Puntero de datos urgentes en TCP  
-     
 
     # Protocolos ARP, ICMP e IGMP directamente de ip.proto
     if 'ip.proto' in df.columns:
@@ -169,8 +165,6 @@ def process_windows(df, window_size=size_of_window):
         )
 
         return header_len
-
-
 
     # Aplicar la función para calcular la longitud de la cabecera
     df['Header_Length'] = df.apply(calculate_header_length, axis=1)
@@ -264,8 +258,7 @@ def process_flows(df, window_size=size_of_window):
         packet_lengths = [p['byte_count'] for p in packets]
         payload_bytes = sum(p['payload_length'] for p in packets)
         header_bytes = sum(p['header_length'] for p in packets)
-        
-   
+
         # Calcular las métricas de longitud de los paquetes
         min_length = np.min(packet_lengths) if packet_lengths else 0
         max_length = np.max(packet_lengths) if packet_lengths else 0
@@ -383,8 +376,6 @@ def process_flows(df, window_size=size_of_window):
             flow_iat                    # Tiempo de llegada entre cualquier paquete del flujo
         )
 
-
-
     def dynamic_two_streams(incoming, outgoing):
         inco_ave = sum(incoming) / len(incoming) if len(incoming) > 0 else 0
         outgoing_ave = sum(outgoing) / len(outgoing) if len(outgoing) > 0 else 0
@@ -401,7 +392,6 @@ def process_flows(df, window_size=size_of_window):
 
         return magnite, radius, covariance, var_ratio, weight
 
-
     # Crear DataFrame de estadísticas con medias de los flows
     flow_stats = []
     for window in window_flows:
@@ -411,7 +401,6 @@ def process_flows(df, window_size=size_of_window):
                 flow_stats.append([window,flow, rate, srate, drate, ack_count, syn_count, fin_count, rst_count, bytes, min_length, max_length, avg_length, std_length, num_packets, magnite, radius, covariance, var_ratio, weight, orig_bytes, resp_bytes, orig_pkts, resp_pkts, flow_timestamps, fwd_timestamps, bwd_timestamps, fwd_pkts_tot, bwd_pkts_tot, fwd_data_pkts_tot, bwd_data_pkts_tot, fwd_pkts_per_sec, bwd_pkts_per_sec, flow_pkts_per_sec, fwd_header_size, bwd_header_size, fwd_pkts_payload, bwd_pkts_payload, flow_pkts_payload, fwd_iat, bwd_iat, flow_iat])
 
                 columns = ['Window', 'flow', 'Rate', 'Srate', 'Drate', 'ack_count', 'syn_count', 'fin_count', 'rst_count', 'Bytes', 'Min_Length', 'Max_Length', 'Avg_Length', 'Std_Length', 'Number', 'Magnite', 'Radius', 'Covariance', 'Var_Ratio', 'Weight', 'Orig_Bytes', 'Resp_Bytes', 'Orig_Pkts', 'Resp_Pkts', 'flow_timestamps', 'fwd_timestamps', 'bwd_timestamps', 'Fwd_Pkts_Tot', 'Bwd_Pkts_Tot', 'Fwd_Data_Pkts_Tot', 'Bwd_Data_Pkts_Tot', 'Fwd_Pkts_Per_Sec', 'Bwd_Pkts_Per_Sec', 'Flow_Pkts_Per_Sec', 'Fwd_Header_Size', 'Bwd_Header_Size', 'Fwd_Pkts_Payload', 'Bwd_Pkts_Payload', 'Flow_Pkts_Payload', 'Fwd_IAT', 'Bwd_IAT', 'Flow_IAT']
-
 
     stats_flow_df = pd.DataFrame(flow_stats, columns=columns)  
     
@@ -483,28 +472,3 @@ def process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_
         print(f"Estadísticas combinadas guardadas en {output_combined_stats}")
 
 process_pcap(pcap_file, output_csv, output_stats, output_flow_stats, output_combined_stats, mode)
-
-
-
-"""
-    if mode in ["ventana", "all"]:
-        first_chunk = True
-        for chunk in pd.read_csv(output_csv, chunksize=100_000, low_memory=False):
-            stats = process_windows(chunk, window_size=size_of_window)
-            stats.to_csv(output_stats, mode='w' if first_chunk else 'a', index=False, header=first_chunk)
-            first_chunk = False
-
-        print(f"Estadísticas por ventana guardadas en {output_stats}")
-
-
-    if mode in ["flujos", "all"]:
-        first_chunk = True
-        for chunk in pd.read_csv(output_csv, chunksize=100_000, low_memory=False):
-            # Procesar flows por chunk (reinicia cada vez)
-            stats_flow = process_flows(chunk, window_size=size_of_window)
-            # Guardar estadísticas de flows
-            stats_flow.to_csv(output_flow_stats, mode='w' if first_chunk else 'a', index=False, header=first_chunk)
-            first_chunk = False
-
-        print(f"Estadísticas por flujo guardadas en {output_flow_stats}")
-"""
