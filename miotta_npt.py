@@ -62,7 +62,7 @@ def main():
 
     runner = {"classic": run_classic, "nprint": run_nprint}.get(config["mode"])
     if runner is None:
-        raise ValueError(f"Unsupported mode: {config["mode"]}")
+        raise ValueError(f"Unsupported mode: {config['mode']}")
 
     with (ThreadPoolExecutor(max_workers=config.get("threads", 4)) as executor):
         results = executor.map(lambda pcap: runner(config, pcap), args.pcap_files)
