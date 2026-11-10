@@ -4,7 +4,6 @@ import yaml
 import argparse
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dpkt import pcap
 
 # Folder of this script: the helper scripts and the nPrint binary are found from here,
 # so the tool can be launched from any working directory.
