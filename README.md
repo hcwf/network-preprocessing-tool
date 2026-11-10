@@ -64,6 +64,7 @@ output_dir: "./output"
 classic:
   mode: all                 # Analysis type: paquetes (packets), ventana (windows), flujos (flows), combinada (windows + flows), all
   size_of_window: 10        # Number of packets per window
+  disable_smb_dissection: True  # Disables costly dissection of SMB, SMB2 and NBSS packets that significantly raise processing times. Does not change the output.
 
 nprint:
   headers: [ethernet, ipv4, ipv6, absolute_time, icmp, tcp, udp, relative_time, arp]    # Protocol headers included in the output
