@@ -18,6 +18,10 @@ Everything else (other VLAN IDs, tagged packets without an untagged twin, untagg
 
 Memory depends on the window, not on the file size. Use --dry-run first: it only reports (including the time
 gaps between the two copies) and writes nothing.
+
+Give - as input and/or output to read from standard input and/or write to standard output, for example
+  mergecap -a -F pcap -w - part*.pcap | dedup_pcap.py - - | tcpdump -r - -w dedup.pcap -C 2000
+When the packets go to standard output, the report is printed on standard error.
 """
 import argparse
 import collections
@@ -235,9 +239,9 @@ def dedup(infile, outfile, window_ns, vlans, max_pending, progress=True, unmatch
     return stats, gaps, other_vlans
 
 
-def print_report(stats, gaps, other_vlans, dry_run):
+def print_report(stats, gaps, other_vlans, dry_run, out=None):
     total, removed = stats["packets"], stats["removed"]
-    out = sys.stdout
+    out = out or sys.stdout
     print(f"\nPackets read:                         {total:>14,}", file=out)
     print(f"  untagged:                           {stats['untagged']:>14,}", file=out)
     print(f"  tagged with a chosen VLAN ID:       {stats['tagged']:>14,}", file=out)
@@ -265,8 +269,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Remove the VLAN-tagged copy of packets that were recorded twice (untagged and tagged). "
                     "Run it before miotta_npt.py; the kept packets are copied unchanged and in order.")
-    parser.add_argument("input", help="classic .pcap file (use editcap -F pcap to convert a pcapng file)")
-    parser.add_argument("output", nargs="?", help="where to write the result (not needed with --dry-run)")
+    parser.add_argument("input", help="classic .pcap file, or - for standard input "
+                                      "(use editcap -F pcap to convert a pcapng file)")
+    parser.add_argument("output", nargs="?", help="where to write the result, or - for standard output; the report "
+                                                  "then goes to standard error (not needed with --dry-run)")
     parser.add_argument("--window-us", type=float, default=1000.0,
                         help="largest time difference in microseconds between the two copies (default: 1000 = 1 ms)")
     parser.add_argument("--vlan", type=int, nargs="+", default=[1], metavar="ID",
@@ -283,18 +289,33 @@ def main():
         parser.error("an output file is needed (or use --dry-run)")
     if args.window_us < 0 or args.max_pending < 1:
         parser.error("--window-us must be >= 0 and --max-pending >= 1")
-    if args.output and os.path.abspath(args.output) == os.path.abspath(args.input):
+    from_stdin = args.input == "-"
+    to_stdout = not args.dry_run and args.output == "-"
+    if (args.output and not from_stdin and args.output != "-"
+            and os.path.abspath(args.output) == os.path.abspath(args.input)):
         parser.error("the output must not be the input file")
+    if from_stdin and sys.stdin.isatty():
+        parser.error("standard input is a terminal; pipe a pcap into it")
+    if to_stdout and sys.stdout.isatty():
+        parser.error("standard output is a terminal; pipe it into another program or give a file name")
 
     window_ns = int(args.window_us * 1000)
     vlans = set(args.vlan)
-    partial = None if args.dry_run else args.output + ".part"
+    # a file is written as NAME.part and renamed at the end; a pipe cannot be renamed, so it is written directly
+    partial = None if args.dry_run or to_stdout else args.output + ".part"
     side_paths = [] if not args.save_unmatched else [args.save_unmatched + "_tagged.pcap",
                                                       args.save_unmatched + "_untagged.pcap"]
     try:
         with contextlib.ExitStack() as files:
-            infile = files.enter_context(open(args.input, "rb", buffering=16 * 1024 * 1024))
-            outfile = files.enter_context(open(partial, "wb", buffering=16 * 1024 * 1024)) if partial else None
+            infile = files.enter_context(open(sys.stdin.fileno() if from_stdin else args.input, "rb",
+                                              buffering=16 * 1024 * 1024, closefd=not from_stdin))
+            if to_stdout:
+                outfile = files.enter_context(open(sys.stdout.fileno(), "wb", buffering=16 * 1024 * 1024,
+                                                   closefd=False))
+            elif partial:
+                outfile = files.enter_context(open(partial, "wb", buffering=16 * 1024 * 1024))
+            else:
+                outfile = None
             sides = [files.enter_context(open(path, "wb", buffering=4 * 1024 * 1024)) for path in side_paths]
             stats, gaps, other_vlans = dedup(infile, outfile, window_ns, vlans, args.max_pending,
                                              unmatched_tagged=sides[0] if sides else None,
@@ -305,7 +326,7 @@ def main():
         if partial is not None and os.path.exists(partial):
             os.remove(partial)
         raise
-    print_report(stats, gaps, other_vlans, args.dry_run)
+    print_report(stats, gaps, other_vlans, args.dry_run, out=sys.stderr if to_stdout else sys.stdout)
 
 
 if __name__ == "__main__":
@@ -313,3 +334,10 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         sys.exit(130)
+    except BrokenPipeError:
+        # the program reading our standard output has gone away (for example tcpdump stopped)
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())   # no second error at interpreter exit
+        except OSError:
+            pass
+        sys.exit("ERROR: the program reading the output has closed the pipe; the output is incomplete.")
