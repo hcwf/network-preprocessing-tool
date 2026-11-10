@@ -60,6 +60,7 @@ Basic example (`config/example_config.yaml`):
 ```yaml
 mode: "nprint"              # or "classic"
 output_dir: "./output"
+threads: 6                  # default = 1, limited by the cores of your CPU
 
 classic:
   mode: all                 # Analysis type: paquetes (packets), ventana (windows), flujos (flows), combinada (windows + flows), all
