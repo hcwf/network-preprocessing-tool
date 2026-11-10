@@ -3,6 +3,8 @@ import sys
 import yaml
 import argparse
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from dpkt import pcap
 
 # Folder of this script: the helper scripts and the nPrint binary are found from here,
 # so the tool can be launched from any working directory.
@@ -56,18 +58,16 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    mode = config["mode"]
-
     os.makedirs(config["output_dir"], exist_ok=True)
 
-    for pcap_file in args.pcap_files:
-        print(f"Processing file: {pcap_file}")
-        if mode == "classic":
-            run_classic(config, pcap_file)
-        elif mode == "nprint":
-            run_nprint(config, pcap_file)
-        else:
-            raise ValueError(f"Unsupported mode: {mode}")
+    runner = {"classic": run_classic, "nprint": run_nprint}.get(config["mode"])
+    if runner is None:
+        raise ValueError(f"Unsupported mode: {config["mode"]}")
+
+    with (ThreadPoolExecutor(max_workers=config.get("threads", 4)) as executor):
+        results = executor.map(lambda pcap: runner(config, pcap), args.pcap_files)
+        for pcap_file, _ in zip(args.pcap_files, results):
+            print(f"Finished: {pcap_file}")
 
 if __name__ == "__main__":
     main()
