@@ -30,6 +30,9 @@ def run_classic(config, pcap):
     if config["classic"].get("disable_smb_dissection", False):
         cmd.append("--disable_smb_dissection")
 
+    if config["classic"].get("disable_tcp_reassembly", False):
+        cmd.append("--disable_tcp_reassembly")
+
     print(f"Running Classic Preprocessing: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 

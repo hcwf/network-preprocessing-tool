@@ -66,6 +66,7 @@ classic:
   mode: all                 # Analysis type: paquetes (packets), ventana (windows), flujos (flows), combinada (windows + flows), all
   size_of_window: 10        # Number of packets per window
   disable_smb_dissection: true  # Disables costly dissection of SMB and SMB2 packets that significantly raise processing times. Does not change the output.
+  disable_tcp_reassembly: true  # Disables costly reassembly of TCP chunks over a stream. Does not change the output.
 
 nprint:
   headers: [ethernet, ipv4, ipv6, absolute_time, icmp, tcp, udp, relative_time, arp]    # Protocol headers included in the output

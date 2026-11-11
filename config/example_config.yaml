@@ -5,6 +5,8 @@ threads: 6  # default = 1, limited by the cores of your CPU
 classic:
   mode: all      # Tipo de análisis (paquetes, ventana, flujos, combinada, all)
   size_of_window: 10     # Número de paquetes por ventana
+  disable_smb_dissection: true  # default = false, stops the dissection of SMB and SMB2 packets, saving processing time and RAM
+  disable_tcp_reassembly: true  # default = false, stops the reassembly of TCP chunks in a stream, which impacts RAM heavily
 
 nprint:
   headers: [ethernet, ipv4, ipv6, absolute_time, icmp, tcp, udp, relative_time, arp]    # Headers de los protocolos incluidos en el output
