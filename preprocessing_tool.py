@@ -15,6 +15,7 @@ parser.add_argument("--mode", type=str, choices=["combinada", "paquetes", "venta
 parser.add_argument("--output_dir", type=str, default=".",
                     help="Carpeta donde se escriben los CSV (por defecto: la carpeta actual)")
 parser.add_argument("--disable_smb_dissection", action="store_true", help="Disables dissection of SMB and SMB2 packets.\nNone of the outputs are needed for the analysis, but enabling this setting can significantly shorten processing time when heavy SMB traffic is appearing in PCAPs.")
+parser.add_argument("--disable_tcp_reassembly", action="store_true", help="Disables reassembly of TCP chunks.\nDoesn't affect the output, but saves RAM.")
 
 # Parsear los argumentos
 args = parser.parse_args()
@@ -56,6 +57,9 @@ def run_tshark(pcap_file, output_csv):
 
     if args.disable_smb_dissection:
         command += ["--disable-protocol", "smb,smb2"]  # Disables the dissection of SMB protocols.
+
+    if args.disable_tcp_reassembly:
+        command += ["-o", "tcp.desegment_tcp_streams:FALSE"]  # Disables the reassembly of TCP chunks over a stream.
 
     with open(output_csv, 'w') as f:
         try:
